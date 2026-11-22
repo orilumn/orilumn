@@ -1125,6 +1125,43 @@ internal fun noteCandidates(
     while (runEnd + 1 < lines.size && !spansContent(lines[runEnd + 1])) {
         runEnd++
     }
+    // 满行只切断**正文区内的**空白：它右边 / 左边的页边距那一列仍然是连通的，
+    // 正文区里放不下整句时，允许沿这条侧边空白再往外看一行——那里常常是上一行 / 下一行
+    // 行尾留下的一大块空白（2026-11-22 用户指出真机「函数」：隔一条满行的上方明明有一整行长空白，
+    // 批注却在窄页边距列里折成「函数…」）。**只跨一条满行，且跨过去那一行本身不能又是满行**，
+    // 再多就是真的隔开了，仍按规则第 6 条处理。
+    //
+    // 只给「行侧真有一块空白」的行开口（空白要伸进正文区，不是只剩远处那条页边距窄列）；
+    // 否则满行照旧把范围切死——这也是 [a full width line cuts the usable range] 的旧口径。
+    fun hasSideBlank(row: NoteTextLine): Boolean {
+        val rightEdge = if (contentRight < Float.MAX_VALUE / 2f) {
+            contentRight
+        } else {
+            lines.maxOf { it.rect.right }
+        }
+        val leftEdge = contentLeft ?: lines.minOf { it.rect.left }
+        return freeRects.any { f ->
+            f.top < row.rect.bottom - NOTE_GEOM_EPS &&
+                f.bottom > row.rect.top + NOTE_GEOM_EPS &&
+                f.height >= metrics.lineH * 0.9f &&
+                (
+                    (f.left < rightEdge - preferred && f.right > row.rect.right + preferred) ||
+                        (f.right > leftEdge + preferred && f.left < row.rect.left - preferred)
+                    )
+        }
+    }
+    if (runStart > 0 && spansContent(lines[runStart - 1]) &&
+        runStart - 2 >= 0 && !spansContent(lines[runStart - 2]) &&
+        hasSideBlank(lines[runStart - 2])
+    ) {
+        runStart -= 2
+    }
+    if (runEnd + 1 < lines.size && spansContent(lines[runEnd + 1]) &&
+        runEnd + 2 < lines.size && !spansContent(lines[runEnd + 2]) &&
+        hasSideBlank(lines[runEnd + 2])
+    ) {
+        runEnd += 2
+    }
     val charW = max(charWidthPx, 1f)
     val baseGlyphs = note.rects
         .filter { nearestLineIndex(it, lines) == base }
@@ -1479,6 +1516,20 @@ internal fun noteCandidates(
         val top = sideColumnTop(rowIndex, row, f, size)
         if (top.isNaN()) return
         add(rowIndex, ring, tier, f, left, top, size)
+        // 上一行 / 下一行的右侧往往是一整块空白：框不必永远贴在那一行文字旁边。
+        // 对锚点来说，这块空白里离它最近的地方可能靠右（真机「函数」：上一行只有「出」一个字，
+        // 若仍从「出」后面起排，框被拉到左边，就近档输给下方空白）。再补一个横向对准锚点的候选，
+        // 让「就近」真的量到最近的落点。
+        if (rowIndex != base) {
+            val hi = f.right - far - size.width
+            if (hi > left + NOTE_GEOM_EPS) {
+                val center = (anchor.left + anchor.right) / 2f
+                val nearLeft = (center - size.width / 2f).coerceIn(left, hi)
+                if (nearLeft > left + NOTE_GEOM_EPS) {
+                    add(rowIndex, ring, tier, f, nearLeft, top, size)
+                }
+            }
+        }
     }
 
     /** 正左：与正右对称（含规则第 6 条：页边距那一列最多折两行）。 */
@@ -1494,6 +1545,17 @@ internal fun noteCandidates(
         val top = sideColumnTop(rowIndex, row, f, size)
         if (top.isNaN()) return
         add(rowIndex, ring, tier, f, right - size.width, top, size)
+        // 与正右同理：上一行 / 下一行的左侧是一整块空白时，补一个横向对准锚点的落点。
+        if (rowIndex != base) {
+            val lo = f.left + far + size.width
+            if (lo < right - NOTE_GEOM_EPS) {
+                val center = (anchor.left + anchor.right) / 2f
+                val nearRight = (center + size.width / 2f).coerceIn(lo, right)
+                if (nearRight < right - NOTE_GEOM_EPS) {
+                    add(rowIndex, ring, tier, f, nearRight - size.width, top, size)
+                }
+            }
+        }
     }
 
     /** 正下：近侧 1em（竖直引线要从这段空档出去），下方按档位。 */
@@ -2372,7 +2434,8 @@ internal fun noteBubblePlacements(
     // 分批发候选：先「本行相邻空间」，再一圈一圈跨行；每圈先整句、再补截断。
     // 放不下才继续要下一批。分批顺序按圈走（环 0 整句 → 环 0 截断 → 环 1 …），
     // 而排序键里整句排在环数之前，所以「整句优先」是在**已要到的候选**里成立的：
-    // 更外那一圈的整句要等本圈截断也放不下时才会被要进来（每条批注都全页算一遍太贵）。
+    // 放位循环一旦只拿到截断，会继续把外圈要进来，直到找到整句或候选穷尽；不会让
+    // 「本圈现成的截断」压过「外圈本来放得下的整句」（2026-11-22「函数」）。
     fun generate(
         note: NoteInk,
         scope: NoteCandidateScope,
@@ -3105,10 +3168,19 @@ private fun assignNoteCandidates(
             if (cand != null && (best == null || before(cand, best))) best = cand
             val cur = best
             if (cur != null) {
-                // 现成的位置就是这一带最合适的：直接落。
-                // 挪出来的位置还要再看几圈——它可能已经被挤出隔两行（下面是 [lookUntil] 的口径）。
-                if (!cur.pushed) break
-                lookUntil = cur.candidate.ring + max(1, cur.candidate.distanceBand)
+                // 整句永远排在截断之前（规则第 2 条）：现成的截断位置只是先记着，
+                // 还要继续往外要候选，直到找到整句或候选穷尽。旧实现一见现成的截断就落，
+                // 真机「函数」就落在窄页边距列里折成「函数…」，而跨过一条满行的上方
+                // 明明还有一行能放下整句（2026-11-22 用户指出）。
+                if (!cur.candidate.complete) {
+                    lookUntil = max(lookUntil, lines.size)
+                } else if (!cur.pushed) {
+                    // 现成的整句就是这一带最合适的：直接落。
+                    break
+                } else {
+                    // 挪出来的整句还要再看几圈——它可能已经被挤出隔两行（下面是 [lookUntil] 的口径）。
+                    lookUntil = cur.candidate.ring + max(1, cur.candidate.distanceBand)
+                }
                 if (seenRing > lookUntil) break
             }
             val batch = nextBatch(note) ?: break
@@ -3338,8 +3410,16 @@ internal fun arrangeSharedBlankNotes(
                         shifted(outward, short.candidate.rect, -delta),
                 )
                 var applied = false
+                val pairBlanks = listOf(long.candidate.freeRect, short.candidate.freeRect)
                 for ((longRect, shortRect) in attempts) {
-                    if (!inOwnBlank(long.candidate, longRect) || !inOwnBlank(short.candidate, shortRect)) continue
+                    // 两条各自被选中的空白不一定相同：短的先被长的那条挤到下一块空白，
+                    // 它的 freeRect 顶在更下面，贴紧重排就会被「不许出自己那块空白」挡住。
+                    // 同一组里两块空白都是无字空地，允许互相用（2026-11-23「详细 / 讨论」）。
+                    if (pairBlanks.none { inOwnBlank(long.candidate, longRect, it) } ||
+                        pairBlanks.none { inOwnBlank(short.candidate, shortRect, it) }
+                    ) {
+                        continue
+                    }
                     val newLong = reflowOne(long, longRect)
                     val newShort = reflowOne(short, shortRect)
                     if (newLong.candidate.conflicts(newShort.candidate, marginX, marginY)) continue
@@ -3608,13 +3688,22 @@ internal fun arrangeSharedBlankNotes(
             }
             // 不许横在**更外侧那条**的选区上方：那条的引线要从这里出去（用户原话：
             // 「不应该把左边 boxes 的批注放在 of 上面，除非 of 的批注不打算放上面」）。
+            // 只算**真压住选区**（纵向与选区相交）的情形。框已经落到选区下方时，只是引线要绕一下，
+            // 交给 [routeNoteArrow] 的避障即可；再为它把批注往下推，读者看到的就是「白白空两行」
+            // （2026-11-23 真机「详细 / 讨论」：短框本来贴着一行，被这条规则推到下一行之外）。
             if (vertical) {
                 val myDepth = depthOf(r, outward)
                 for (o in members) {
                     if (o == self) continue
                     if (depthOf(out[o].candidate.rect, outward) <= myDepth + NOTE_GEOM_EPS) continue
                     val ink = rectUnion(out[o].note.rects)
-                    if (ink.left < r.right - NOTE_GEOM_EPS && r.left < ink.right - NOTE_GEOM_EPS) return false
+                    val coversInk =
+                        r.top < ink.bottom - NOTE_GEOM_EPS && ink.top < r.bottom - NOTE_GEOM_EPS
+                    if (coversInk &&
+                        ink.left < r.right - NOTE_GEOM_EPS && r.left < ink.right - NOTE_GEOM_EPS
+                    ) {
+                        return false
+                    }
                 }
             }
             return true

@@ -289,6 +289,34 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `complete note across a full divider beats a truncated margin column`() {
+        // 2026-11-22 真机「函数」：锚点在一行满行的行尾，上一行也是满行，
+        // 正右只剩窄页边距列（折两行也读不完）；但窄列沿着页边距往上走，隔一条满行
+        // 的上一行是短行，行尾有一整行长空白，能一行放下整句。
+        // 旧实现：环 0 的截断候选一现成便落位，根本不会去要环 1 的整句。
+        val top = rect(0f, 0f, 80f, 40f)
+        val divider = rect(0f, 40f, 600f, 80f)
+        val anchorLine = rect(0f, 80f, 600f, 120f)
+        val anchor = rect(560f, 80f, 600f, 120f)
+        val text = "函数就是功能呀，老外的词汇太贫乏了"
+        val bubbles = place(
+            notes = listOf(noteInk(1, listOf(anchor), text = text)),
+            textInk = listOf(top, divider, anchorLine),
+            textLines = listOf(
+                NoteTextLine(top, blockId = 0, index = 0),
+                NoteTextLine(divider, blockId = 0, index = 1),
+                NoteTextLine(anchorLine, blockId = 0, index = 2),
+            ),
+            contentBottom = 130f,
+            pageBottom = 130f,
+        )
+        val b = bubbles.single()
+        val fit = noteTextFit(b.text, b.widthPx - notePad, b.fontPx, b.maxLines)
+        assertTrue("隔一条满行的长空白能放下整句，不该截断：$b", fit.complete)
+        assertTrue("应落在满行上方的长空白里，而不是右侧窄列：$b", b.topPx < 80f)
+    }
+
+    @Test
     fun `tall gap fits more lines than it used to`() {
         // 空白够高就多放几行，不再死卡三行（D-28 第 3 部分）。
         val first = rect(0f, 0f, 600f, 40f)
@@ -4336,6 +4364,57 @@ class NoteBubblesTest {
                 )
             }
         }
+    }
+
+    /**
+     * 2026-11-23 真机「详细 / 讨论」：短批注的框在横向上压住了长批注的选区，但纵向已经落到
+     * 选区下方。旧口径只按横向重叠就判「挡住出线」，把短批注一路推到长批注那一格，
+     * 读者看到的是「中间白白空了近两行」。引线可以绕开框，**近**才是硬要求。
+     */
+    @Test
+    fun `short note below a long one stays next to the anchor line`() {
+        val blank = rect(333f, 1367f, 1053f, 1609f)
+        fun candidate(id: Long, side: NoteSide, r: Rect) = NoteCandidate(
+            annotationId = id,
+            rect = r,
+            freeRect = blank,
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = side,
+            ring = 0,
+            distance = 0f,
+        )
+        val short = NoteChoice(
+            noteInk(9L, listOf(rect(343f, 1320f, 412f, 1371f)), "就是具体"),
+            candidate(9L, NoteSide.BELOW_RIGHT, rect(384f, 1393f, 523f, 1434f)),
+        )
+        val long = NoteChoice(
+            noteInk(
+                10L,
+                listOf(rect(448f, 1320f, 516f, 1371f)),
+                "怎么讨论呢？讨论什么呢？以什么形式讨论呢？开个party可好？再长一点会怎样？折行呢？",
+            ),
+            candidate(10L, NoteSide.BELOW, rect(346f, 1440f, 1041f, 1521f)),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(long, short),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+            noteMetrics = noteMetrics,
+        )
+        val dbg = arranged.joinToString(" | ") { "${it.note.annotationId}:${it.candidate.rect}" }
+        val s = arranged.single { it.note.annotationId == 9L }.candidate.rect
+        val l = arranged.single { it.note.annotationId == 10L }.candidate.rect
+        assertTrue(
+            "短批注应贴着锚点行（离选区底不超过 1em + 一行），实际 top=${s.top}：$dbg",
+            s.top <= 1371f + noteMetrics.marginY * 10f + noteLine,
+        )
+        assertTrue("长批注应在外侧（下方）：$dbg", l.top > s.bottom - 1f)
+        assertTrue(
+            "两条之间不许空出半行以上：$dbg",
+            l.top - s.bottom <= noteLine * 0.5f,
+        )
     }
 
     /**

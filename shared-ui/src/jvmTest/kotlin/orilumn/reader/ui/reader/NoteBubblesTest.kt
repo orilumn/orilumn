@@ -672,7 +672,7 @@ class NoteBubblesTest {
 
     @Test
     fun `above and below keep half em on both sides`() {
-        // 正下：近侧（纵向）仍是 1em，左右两侧是非出线侧，首选 0.5em、压缩档 2px。
+        // 正下：左右两侧是非出线侧，首选 0.5em、压缩档 2px（近侧的 1em 见后面两个用例）。
         val free = rect(0f, 40f, 400f, 400f)
         val list = candidates(
             note = noteInk(1, listOf(rect(0f, 0f, 200f, 40f)), text = "这条批注要折成很多行才能把这块空白填满"),
@@ -683,6 +683,126 @@ class NoteBubblesTest {
         val tight = below.single { it.marginTier == 1 }
         assertEquals("首选档左边应留 0.5em（减去 2px 外扩）", free.left + noteMetrics.farGap - 2f, preferred.rect.left, 0.5f)
         assertEquals("压缩档左边只剩 2px", free.left, tight.rect.left, 0.5f)
+    }
+
+    @Test
+    fun `mid line selection keeps the one em vertical gap below`() {
+        // 选区落在行中间：两侧都是别的正文，正下那 1em 仍是竖线引线的空档。
+        val line = rect(0f, 0f, 600f, 40f)
+        val list = candidates(
+            note = noteInk(1, listOf(rect(200f, 0f, 400f, 40f)), text = "这条批注足够宽，整条压在选区上"),
+            freeRects = listOf(rect(0f, 40f, 600f, 400f)),
+            lines = listOf(NoteTextLine(rect = line, index = 0)),
+        )
+        val below = list.filter { it.side == NoteSide.BELOW }
+        assertTrue("行中间也该有正下候选", below.isNotEmpty())
+        assertEquals(
+            "选区不贴行首 / 行末时，正下仍要外推 1em 给竖线引线",
+            40f + noteMetrics.preferredMargin,
+            below.first().rect.top,
+            0.5f,
+        )
+    }
+
+    @Test
+    fun `line end selection drops the one em gap and reaches into the margin`() {
+        // 2026-11-23：选区是行末那几个字 ⇒ 右边就是页边空白，引线从那里竖着下去再横扎进字侧，
+        // 正下不再外推 1em：框贴到最小缝，并把右缘伸进页边空白一个「走廊」宽。
+        val line = rect(0f, 0f, 600f, 40f)
+        val list = candidates(
+            note = noteInk(1, listOf(line), text = "想法"),
+            freeRects = listOf(rect(0f, 40f, 640f, 400f)),
+            lines = listOf(NoteTextLine(rect = line, index = 0)),
+        )
+        val below = list.filter { it.side == NoteSide.BELOW }
+        assertTrue("行末也该有正下候选", below.isNotEmpty())
+        val snug = below.first()
+        assertEquals("行末不再外推 1em，只留最小缝", 40f + 2f, snug.rect.top, 0.5f)
+        assertTrue(
+            "框右缘应伸进右侧页边空白一个走廊宽（L 的竖段），实际 right=${snug.rect.right}",
+            snug.rect.right >= line.right + noteMarginLegPx(noteLine) - 1f,
+        )
+        assertTrue("伸出去以后仍要压住选区（否则就不是正下了），实际 left=${snug.rect.left}", snug.rect.left < line.right)
+    }
+    @Test
+    fun `line end below note routes the leader as an L through the page margin`() {
+        // 同一件事的另一半：布线要把竖段放进右侧页边空白，最后横着扎进字的侧面。
+        val glyph = rect(0f, 0f, 600f, 40f)
+        val leg = noteMarginLegPx(noteLine)
+        val box = rect(600f + leg - 44f, 42f, 600f + leg, 64f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = listOf(glyph),
+            lineH = noteLine,
+            side = NoteSide.BELOW,
+            lineBoxes = listOf(glyph),
+            targetInk = listOf(glyph),
+            marginSide = 1,
+        )
+        assertTrue("贴行末的正下应画 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("L 是两段三个点，实际=$pts", 3, pts.size)
+        assertTrue("竖段要落在选区右侧的页边空白里，实际=$pts", pts[0].x > glyph.right + 1f)
+        assertEquals("首段竖直离开框边", pts[0].x, pts[1].x, 0.5f)
+        assertEquals("末段横着扎进字的右侧", glyph.right, pts[2].x, 0.5f)
+        assertEquals("末段水平", pts[1].y, pts[2].y, 0.5f)
+    }
+
+    @Test
+    fun `line start above note routes the leader as an L through the left margin`() {
+        val glyph = rect(300f, 100f, 600f, 140f)
+        val leg = noteMarginLegPx(noteLine)
+        val box = rect(glyph.left - leg, 76f, glyph.left - leg + 44f, 98f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = listOf(glyph),
+            lineH = noteLine,
+            side = NoteSide.ABOVE,
+            lineBoxes = listOf(glyph),
+            targetInk = listOf(glyph),
+            marginSide = -1,
+        )
+        assertTrue("贴行首的正上应画 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("L 是两段三个点，实际=$pts", 3, pts.size)
+        assertTrue("竖段要落在选区左侧的页边空白里，实际=$pts", pts[0].x < glyph.left - 1f)
+        assertEquals("首段竖直离开框边", pts[0].x, pts[1].x, 0.5f)
+        assertEquals("末段横着扎进字的左侧", glyph.left, pts[2].x, 0.5f)
+        assertEquals("末段水平", pts[1].y, pts[2].y, 0.5f)
+    }
+
+    @Test
+    fun `corner note in the page margin drops its leader through the margin`() {
+        // 真机「在几章中」（2026-11-23）：框在左侧页边空白里、选区贴行首。引线原来从框的右边
+        // 横出去，再在 x≈134.3 竖下来——正好夹在「在」（右缘 133）与「几」（左缘 134.8）之间，
+        // 读者看到的是「从字缝里切下去」。应改成顺着页边空白竖到底、再横着扎进首字左侧。
+        val glyphs = listOf(
+            rect(99f, 1328.7f, 133f, 1362.7f),
+            rect(134.8f, 1330.7f, 167.8f, 1362.7f),
+            rect(169.5f, 1328.7f, 202.5f, 1362.7f),
+            rect(206.3f, 1328.7f, 235.3f, 1362.7f),
+        )
+        val line = rect(100f, 1320f, 980f, 1371f)
+        val box = rect(14.7f, 1236.8f, 98f, 1318f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = glyphs,
+            glyphs = glyphs,
+            lineH = 40.6f,
+            side = NoteSide.ABOVE_LEFT,
+            lineBoxes = listOf(line),
+            targetInk = glyphs,
+            marginSide = -1,
+        )
+        assertTrue("页边距里的框应画两段 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("L 是两段三个点，实际=$pts", 3, pts.size)
+        assertEquals("首段竖直离开框底", pts[0].x, pts[1].x, 0.5f)
+        assertEquals("框底出线", box.bottom, pts[0].y, 0.5f)
+        assertTrue("竖段要落在页边空白里（字缘左边），实际=${pts[0].x}", pts[0].x <= 99f)
+        assertEquals("末段横着扎进首字左侧", 99f, pts[2].x, 0.5f)
+        assertEquals("末段水平", pts[1].y, pts[2].y, 0.5f)
+        assertTrue("横段要够长，箭头才画得出来，实际=$pts", pts[2].x - pts[1].x >= 10f)
     }
 
     @Test
@@ -3740,9 +3860,12 @@ class NoteBubblesTest {
                 listOf(rect(156f, 1062f, 267f, 1118f)),
                 "英文只用个 body，中文光说“体”怎么感觉都不对！",
             ),
+            // 选区离行末还差十几个像素（不是规则第 13 条的行首 / 行末例外），
+            // 这条用例才谈得上「差一条缝就请对方让一让」——贴到行末时按例外走正上 / 正下，
+            // 那条路不在本例的口径里。
             noteInk(
                 2L,
-                listOf(rect(452f, 1062f, 563f, 1118f)),
+                listOf(rect(452f, 1062f, 545f, 1118f)),
                 "交换。试着把这一行批注拉得很长很长很长很长，还不够长，现在够了。",
             ),
         )

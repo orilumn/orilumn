@@ -4994,4 +4994,96 @@ class NoteBubblesTest {
         assertEquals("并排两条不许被整组重排（are）：$a", 756f, a.top, 1f)
         assertEquals("并排两条不许被整组重排（of）：$o", 756f, o.top, 1f)
     }
+
+    /**
+     * 真机复现（桌面样例页 534×973，2026-11-23）：「of」的框底（797）到字顶（806.9）只剩十来个像素，
+     * 直着下去竖段 7.9px，箭头被夹到 7px，读者只看到一根戳了两像素的短线。
+     *
+     * 竖缝短到画不下箭头时，「竖着进」这一族入口整族不生成，改从框底、字的外侧竖下去，
+     * 过了字的高度再横着扎进字的侧面——两段都够长，画出来是一个 L。
+     * 用户定口：「为什么不在右边画 L 型？」
+     */
+    @Test
+    fun `short vertical gap draws an L into the right side of the word`() {
+        val row = rect(132f, 799f, 901.7f, 840f)
+        val of = listOf(
+            rect(852.5f, 811.9f, 868.5f, 830.9f),
+            rect(869.9f, 806.9f, 883.9f, 829.9f),
+        )
+        // 同一行左边还有「boxes」那五个字：它们是障碍，也是「引线为什么不能横着抹过来」的一半原因。
+        val boxes = listOf(
+            rect(755.3f, 806.9f, 770.3f, 830.9f),
+            rect(770.7f, 811.9f, 786.7f, 830.9f),
+            rect(787f, 812.9f, 804f, 829.9f),
+            rect(803.4f, 811.9f, 819.4f, 830.9f),
+            rect(820.8f, 811.9f, 834.8f, 830.9f),
+        )
+        val bubble = rect(628.34f, 756.42f, 1053.3f, 797f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = of,
+            glyphs = of + boxes,
+            lineH = 40.54f,
+            side = NoteSide.ABOVE,
+            lineBoxes = listOf(row),
+            targetInk = of,
+            rowBoxEntry = true,
+            underlineBands = listOf(rect(852.5f, 834f, 885.3f, 837f)),
+            cornerInk = listOf(rect(852.5f, 799f, 885.3f, 840f)),
+            pageLines = listOf(rect(852.5f, 834f, 885.3f, 837f)),
+            otherBubbles = listOf(rect(390.63f, 756.42f, 609.76f, 797f)),
+        )
+        val pts = arrowPoints(arrow!!)
+        assertEquals("要画成一个 L（三段两个折）：$pts", 3, pts.size)
+        assertEquals("第一段从框底竖着下去：$pts", bubble.bottom, pts[0].y, 0.01f)
+        assertTrue("第一段要竖：$pts", abs(pts[0].x - pts[1].x) < 0.01f)
+        assertTrue("竖段要长到画得下箭头（≥10px）：$pts", pts[1].y - pts[0].y >= 10f)
+        assertTrue("最后一段要横着扎进字：$pts", abs(pts[1].y - pts[2].y) < 0.01f)
+        assertTrue("竖段要走字的右侧：$pts", pts[0].x > of.last().right)
+        assertTrue("横段要向左扎进字：$pts", pts[2].x < pts[1].x)
+        assertEquals("横段落在字的右边缘：$pts", of.last().right, pts[2].x, 0.5f)
+        assertTrue("入口要落在字的竖向范围里：$pts", pts[2].y in of.last().top..of.last().bottom)
+    }
+
+    /**
+     * 真机复现（桌面样例页 534×973，2026-11-23）：「boxes」的框（右下 795.3/750.5）正下方被
+     * 「of」的框（628.3–1053.3 / 756.4–797）堵死，只有两块邻框之间 x≈610–628 那条竖缝能下去。
+     *
+     * 旧实现在这条缝上只按「离目标字近」截前 6 条候选，缝被一排字边挤掉，引线只好从框的最左端
+     * （x≈420）出去、贴着框底横抹过去（用户：「明明放在左上角，引线为什么要从最左边拉过来？」）。
+     */
+    @Test
+    fun `corner note leaves through the corridor beside the neighbouring bubble`() {
+        val row = rect(132f, 799f, 901.7f, 840f)
+        val boxes = listOf(
+            rect(755.3f, 806.9f, 770.3f, 830.9f),
+            rect(770.7f, 811.9f, 786.7f, 830.9f),
+            rect(787f, 812.9f, 804f, 829.9f),
+            rect(803.4f, 811.9f, 819.4f, 830.9f),
+            rect(820.8f, 811.9f, 834.8f, 830.9f),
+        )
+        val bubble = rect(399.77f, 709.96f, 795.32f, 750.54f)
+        val arrow = routeNoteArrow(
+            bubble = bubble,
+            inkRects = boxes,
+            glyphs = boxes,
+            lineH = 40.54f,
+            side = NoteSide.ABOVE_LEFT,
+            lineBoxes = listOf(row),
+            targetInk = boxes,
+            cornerInk = listOf(rect(737.9f, 799f, 836.2f, 840f)),
+            otherBubbles = listOf(
+                rect(390.63f, 756.42f, 609.76f, 797f),
+                rect(628.34f, 756.42f, 1053.3f, 797f),
+            ),
+        )
+        val pts = arrowPoints(arrow!!)
+        assertEquals("第一段从框底竖着下去：$pts", bubble.bottom, pts[0].y, 0.01f)
+        assertTrue(
+            "起点要落在两块邻框之间那条缝里（610–628），不许从框的最左端绕：$pts",
+            pts[0].x >= 609.76f && pts[0].x <= 628.34f,
+        )
+        val end = pts.last()
+        assertTrue("末段要横着走到「boxes」上方：$pts", end.y in 795f..800f)
+        assertTrue("箭头要落在「boxes」的横向范围里：$pts", end.x in 737.9f..836.2f)    }
 }

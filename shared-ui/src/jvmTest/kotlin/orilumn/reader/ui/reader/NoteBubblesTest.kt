@@ -4847,4 +4847,151 @@ class NoteBubblesTest {
             }
         }
     }
+
+    /**
+     * 真机复现（桌面样例页，2026-11-23）：`val popcorn = 5 // There are 5 boxes of` 与下一行
+     * `popcorn` 上四条批注的落位。用户投诉三件事：
+     *
+     * - 「are」明明能摆在最近的左上，却被推得很远；
+     * - 「of」在行尾，正上方那格本可以贴着字放（行盒上沿到字上沿那一段是行距，不是正文），
+     *   旧实现从**行盒**量 1em，把它整条往外推了一整个字；
+     * - 「boxes」那条占住了下一行「popcorn」上方的空，把 popcorn 的批注逼到最右边。
+     *
+     * 行框与字墨迹取自真机日志（设备像素，旁注字号 29.4、行盒 41px）：
+     * 第 7 行（`val popcorn …`）行盒 799-840、字墨迹 807-836；第 8 行（`popcorn`）840-881。
+     * 期望落位同样来自真机日志：of 正上、are 左上、boxes 下方、popcorn 左侧页边距。
+     */
+    @Test
+    fun `sample page keeps are of boxes and popcorn near their anchors`() {
+        // (行框, 字墨迹上缘, 字墨迹下缘)：整页正文，供算空白与引线避让。
+        val rows = listOf(
+            Triple(rect(151f, 200f, 481f, 251f), 209f, 243f),
+            Triple(rect(151f, 285f, 481f, 336f), 294f, 328f),
+            Triple(rect(185f, 421f, 754f, 472f), 430f, 465f),
+            Triple(rect(100f, 523f, 586f, 574f), 532f, 567f),
+            Triple(rect(100f, 608f, 200f, 659f), 617f, 651f),
+            Triple(rect(132f, 717f, 345f, 758f), 724f, 752f),
+            Triple(rect(132f, 758f, 345f, 799f), 766f, 795f),
+            Triple(rect(132f, 799f, 902f, 840f), 807f, 836f),
+            Triple(rect(132f, 840f, 247f, 881f), 853f, 877f),
+            Triple(rect(132f, 881f, 869f, 922f), 889f, 918f),
+            Triple(rect(132f, 922f, 934f, 963f), 930f, 956f),
+            Triple(rect(132f, 963f, 329f, 1004f), 971f, 1000f),
+            Triple(rect(132f, 1045f, 738f, 1086f), 1053f, 1082f),
+            Triple(rect(132f, 1086f, 410f, 1127f), 1094f, 1118f),
+            Triple(rect(132f, 1127f, 492f, 1168f), 1135f, 1164f),
+            Triple(rect(132f, 1168f, 263f, 1209f), 1176f, 1202f),
+            Triple(rect(132f, 1209f, 312f, 1250f), 1217f, 1246f),
+            Triple(rect(132f, 1250f, 148f, 1291f), 1257f, 1285f),
+            Triple(rect(185f, 1400f, 951f, 1451f), 1409f, 1444f),
+            Triple(rect(185f, 1451f, 854f, 1502f), 1460f, 1495f),
+            Triple(rect(100f, 1553f, 968f, 1604f), 1562f, 1597f),
+            Triple(rect(100f, 1604f, 267f, 1655f), 1613f, 1647f),
+        )
+        val lines = rows.mapIndexed { i, (r, _, _) -> NoteTextLine(rect = r, blockId = 0, index = i) }
+        val ink = rows.map { (r, top, bottom) -> rect(r.left, top, r.right, bottom) }
+        val bubbles = place(
+            notes = listOf(
+                noteInk(13L, listOf(rect(656f, 799f, 705f, 840f)), "这个会放哪里?"),
+                noteInk(14L, listOf(rect(738f, 799f, 836f, 840f)), "再加一个批注，看看放哪里。"),
+                noteInk(15L, listOf(rect(853f, 799f, 885f, 840f)), "这里也有批注，会放在哪里呢?"),
+                noteInk(16L, listOf(rect(132f, 840f, 247f, 881f)), "什么意思?"),
+            ),
+            textInk = ink,
+            textLines = lines,
+            arrowInk = ink,
+            contentLeft = 100f,
+            contentRight = 968f,
+            contentBottom = 1875f,
+            pageRight = 1068f,
+            pageBottom = 1946f,
+            fontPx = 40.84f,
+        )
+        val dbg = bubbles.joinToString(" | ") {
+            "${it.annotationId}@(${it.leftPx.toInt()},${it.topPx.toInt()}-" +
+                "${(it.leftPx + it.widthPx).toInt()},${boxOf(it).bottom.toInt()})"
+        }
+        assertEquals("四条都要留住：$dbg", 4, bubbles.size)
+        assertTrue("四条都要整句读完：$dbg", bubbles.none { it.compact })
+        val rowTop = 799f
+        val rowBottom = 840f
+        val are = boxOf(bubbles.single { it.annotationId == 13L })
+        val boxes = boxOf(bubbles.single { it.annotationId == 14L })
+        val of = boxOf(bubbles.single { it.annotationId == 15L })
+        val popcorn = boxOf(bubbles.single { it.annotationId == 16L })
+        // 「are」：左上，贴这一行（行盒上沿之上 2px 那一档），横向在选区左边。
+        assertTrue("are 该在选区左边（左上）：$dbg", are.right <= 656f + 0.5f)
+        assertTrue(
+            "are 该贴着本行上沿，不许被推到隔行：$dbg",
+            are.bottom >= rowTop - 8f && are.bottom <= rowTop + 0.5f,
+        )
+        // 「of」：正上方，1em 从**字墨迹**（807）量起 ≈ 777.6 再加 2px 档，而不是从行盒上沿
+        // 799 往上再让一整个字（那样 top 会掉到 728 那一档）。
+        assertTrue(
+            "of 该贴着本行上沿（1em 从字墨迹量起）：$dbg",
+            of.bottom >= rowTop - 6f && of.bottom <= rowTop + 0.5f,
+        )
+        assertTrue("of 该在选区正上方、不许偏出页面右边：$dbg", of.right <= 1053f + 0.5f)
+        // 「boxes」：不许占住「popcorn」左上那一格（用户原话：它把 popcorn 的批注逼到了最右边）。
+        assertTrue(
+            "boxes 不许压在 popcorn 左上的空上：$dbg",
+            !boxes.overlaps(rect(132f, rowTop, 247f, rowBottom)),
+        )
+        // 「popcorn」：要留在本行附近、靠左半边，而不是被挤到页面右边去。
+        assertTrue("popcorn 不许飞到右边：$dbg", popcorn.left < 500f && popcorn.right <= 968f + 0.5f)
+        assertTrue(
+            "popcorn 该贴着本行（`popcorn` 那一行 840-881）：$dbg",
+            popcorn.bottom <= rowBottom + 41.5f && popcorn.top >= rowTop - 45f,
+        )
+        assertTrue("boxes 与 popcorn 不许互相压住：$dbg", !boxes.overlaps(popcorn))
+        // 「are」「of」并排、同一档：谁也不许被抬到上一格（行盒上沿之上 2px 就是最近的一档）。
+        assertTrue("are 与 of 不许重叠：$dbg", !are.overlaps(of))
+        assertTrue("are 与 of 该在同一档：$dbg", abs(are.top - of.top) <= 1f)
+    }
+    /**
+     * 真机复现（桌面样例页，2026-11-23）：「are」与「of」两条斜向框**并排**在同一档里
+     * （一条贴行左、一条贴行右，横向谁也不挡谁的引线）。它们不该被「中心在外、两侧靠内」
+     * 整组重排——旧实现按「离行中线更远的那条该靠内」判违规，把左边那条短批注抬到了隔行。
+     *
+     * 顺带锁住「宽框不算摆反」：「of」的框比选区宽得多，框心落在选区左边，
+     * 但整块仍罩着自己的选区，引线直下就行，不该判成「摆到错侧」再整组重排。
+     */
+    @Test
+    fun `side by side corner notes keep their band`() {
+        val blank = rect(300f, 700f, 1068f, 800f)
+        fun cand(id: Long, r: Rect) = NoteCandidate(
+            annotationId = id,
+            rect = r,
+            freeRect = blank,
+            lines = 1,
+            complete = true,
+            shownChars = 9,
+            side = NoteSide.ABOVE_LEFT,
+            ring = 0,
+            distance = 0f,
+        )
+        val are = NoteChoice(
+            noteInk(13L, listOf(rect(656f, 799f, 705f, 840f)), "这个会放哪里?"),
+            cand(13L, rect(391f, 756f, 610f, 797f)),
+        )
+        val of = NoteChoice(
+            noteInk(15L, listOf(rect(853f, 799f, 885f, 840f)), "这里也有批注，会放在哪里呢?"),
+            cand(15L, rect(628f, 756f, 1053f, 797f)),
+        )
+        val arranged = arrangeSharedBlankNotes(
+            occupied = listOf(are, of),
+            marginX = noteMetrics.marginX,
+            marginY = noteMetrics.marginY,
+            rowMidById = mapOf(13L to 517f, 15L to 517f),
+            // 「of」偏右、该靠右摆：它的框心（840）却落在选区左缘（853）之左——
+            // 旧口径会因此判它「摆到错侧」，整组重排。
+            sideMidById = mapOf(13L to 700f, 15L to 800f),
+            textRects = listOf(rect(132f, 799f, 902f, 840f)),
+            textInk = listOf(rect(132f, 807f, 902f, 836f)),
+        )
+        val a = arranged.single { it.note.annotationId == 13L }.candidate.rect
+        val o = arranged.single { it.note.annotationId == 15L }.candidate.rect
+        assertEquals("并排两条不许被整组重排（are）：$a", 756f, a.top, 1f)
+        assertEquals("并排两条不许被整组重排（of）：$o", 756f, o.top, 1f)
+    }
 }

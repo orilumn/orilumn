@@ -75,6 +75,7 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 | macOS Intel | `Orilumn-<版本>-macos-x64.dmg` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-macos-x64.dmg) |
 | Linux · Ubuntu | `Orilumn-<版本>-linux-x64.deb` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-linux-x64.deb) |
 | Linux · EndeavourOS | `Orilumn-<版本>-linux-x64.AppImage` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-linux-x64.AppImage) |
+| Linux · Fedora / openSUSE | `Orilumn-<版本>-linux-x64.rpm` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-linux-x64.rpm) |
 | Windows | `Orilumn-<版本>-windows-x64.msi` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-windows-x64.msi) |
 | macOS Apple Silicon | `Orilumn-<版本>-macos-arm64.dmg` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-macos-arm64.dmg) |
 | 其他 Linux 发行版 / 桌面环境 | `Orilumn-<版本>-linux-x64.AppImage` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.11-linux-x64.AppImage) |
@@ -82,7 +83,7 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 > ###### 备注
 > “支持”= 能构建出该平台产物；“实测”= 本项目作者真正在对应平台上跑过。其余组合可以跑，但没有验证过，不保证可用。因为作者没有实机，新版 macOS 的触屏功能暂不支持。
 >
-> Linux 除上表列出的首选产物外，另有 `.rpm`（给 Fedora / openSUSE 一类发行版）；`.AppImage` 是通用便携格式，任何发行版解压即跑。所有文件都在同一次发布里。
+> Linux 各发行版也可以直接用 `.AppImage`（通用便携，解压即跑，不挑发行版）。所有文件都在同一次发布里。
 
 
 ## 后续开发计划

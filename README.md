@@ -1,4 +1,4 @@
-# Orilumn
+# <img src="icon.png" width="40" alt="Orilumn 图标"> Orilumn
 
 **Orilumn** 是跨平台 EPUB 阅读器，支持 EPUB 2 和 EPUB 3 标准。Orilumn 是基于 Kotlin KMP/CMP 技术，全程使用 AI 编写的。作者本人没有写代码，但对应用经过长时间的调试和打磨，也是作者目前唯一在平板上使用的 EPUB 阅读器。从目前来看，项目 BUG 应该不多，稳定性在一定程度上是有保证的。
 
@@ -69,18 +69,21 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 
 官方产物在 [Releases](https://github.com/orilumn/orilumn/releases) 里，由 `vX.Y.Z` tag 触发 GitHub Actions 构建。由于时间和设备有限，不会每次构建都一一测试，所以不保证每个平台工作都正常，但平板是我主要的测试和使用平台，应该相对稳定。
 
-| 平台 | 构建文件 | 实测 |
-|---|---|---|
-| Android 7.0+ 平板 | `orilumn-<版本>-android.apk` | ✅ 实测 |
-| macOS Intel | `Orilumn-<版本>-macos-x64.dmg` | ✅ 实测 |
-| Linux · Ubuntu GNOME | `Orilumn-<版本>-linux-x64.deb` / `.rpm` / `.AppImage` | ✅ 实测 |
-| Linux · EndeavourOS GNOME | 同上 | ✅ 实测 |
-| macOS Apple Silicon | `Orilumn-<版本>-macos-arm64.dmg` | ⚠️ 未实测 |
-| Windows | `Orilumn-<版本>-windows-x64.msi` | ⚠️ 未实测 |
-| 其他 Linux 发行版 / 桌面环境 | deb / rpm / AppImage | ⚠️ 未实测 |
+| 平台 | 构建文件 | 实测 | 下载 |
+|---|---|---|---|
+| Android 7.0+ 平板 | `orilumn-<版本>-android.apk` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/orilumn-0.5.10-android.apk) |
+| macOS Intel | `Orilumn-<版本>-macos-x64.dmg` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.10-macos-x64.dmg) |
+| Linux · Ubuntu | `Orilumn-<版本>-linux-x64.deb` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.10-linux-x64.deb) |
+| Linux · EndeavourOS | `Orilumn-<版本>-linux-x64.AppImage` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.10-linux-x64.AppImage) |
+| Windows | `Orilumn-<版本>-windows-x64.msi` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.10-windows-x64.msi) |
+| macOS Apple Silicon | `Orilumn-<版本>-macos-arm64.dmg` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.10-macos-arm64.dmg) |
+| 其他 Linux 发行版 / 桌面环境 | `Orilumn-<版本>-linux-x64.AppImage` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.10-linux-x64.AppImage) |
 
 > ###### 备注
-> “支持”= 能构建出该平台产物；“实测”= 本项目作者真正在上述四个平台上跑过。其余组合可以跑，但没有验证过，不保证可用。因为作者没有实机，新版 macOS 的触屏功能暂不支持。
+> “支持”= 能构建出该平台产物；“实测”= 本项目作者真正在对应平台上跑过。其余组合可以跑，但没有验证过，不保证可用。因为作者没有实机，新版 macOS 的触屏功能暂不支持。
+>
+> Linux 除上表列出的首选产物外，另有 `.rpm`（给 Fedora / openSUSE 一类发行版）；`.AppImage` 是通用便携格式，任何发行版解压即跑。所有文件都在同一次发布里。
+
 
 ## 后续开发计划
 

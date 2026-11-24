@@ -1,4 +1,4 @@
-# <img src="icon.png" width="40" alt="Orilumn 图标"> Orilumn
+# <img src="icon.png" width="40" align="middle" style="vertical-align: middle;" alt="Orilumn 图标"> Orilumn
 
 **Orilumn** 是跨平台 EPUB 阅读器，支持 EPUB 2 和 EPUB 3 标准。Orilumn 是基于 Kotlin KMP/CMP 技术，全程使用 AI 编写的。作者本人没有写代码，但对应用经过长时间的调试和打磨，也是作者目前唯一在平板上使用的 EPUB 阅读器。从目前来看，项目 BUG 应该不多，稳定性在一定程度上是有保证的。
 

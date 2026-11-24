@@ -1,0 +1,19 @@
+# 编辑器侧的同一份约定（IntelliJ / Android Studio / VS Code 都认这个文件）。
+# .gitattributes 是「存错了也能纠回来」，这里是「一开始就别存错」。
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+
+# 批处理必须 CRLF（cmd.exe 对 LF 的批处理解析不可靠）。
+[*.{bat,cmd}]
+end_of_line = crlf
+
+# Markdown 行尾两个空格是「硬换行」，不能被编辑器顺手删掉。
+[*.md]
+trim_trailing_whitespace = false
+
+# 可执行脚本与 Gradle 包装器：保持 LF（Windows 上的 git 签出也可能已由 .gitattributes 保证）。
+[*.sh]
+end_of_line = lf

@@ -92,6 +92,17 @@ inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41
 - 平台差异代码集中存放，不要散落在共享业务/排版/渲染核心代码中
 - 输出方案、代码、注释时，明确标注代码所属层级
 
+## 行尾（任何平台、任何工具都一样）
+
+1. **仓里的文本文件一律 LF**。在 Windows 上写文件（编辑器、脚本、AI 工具都算）**也不许**写成 CRLF；
+   否则 `git status` 会把「只差 CR」的整份文件报成改动，几百行文件能刷出上万行 diff。
+2. 已由 `.gitattributes`（`* text=auto eol=lf`）在 git 层兜底：CRLF 入库前会被归一回 LF，
+   进不了历史；`.editorconfig` 让 IntelliJ / Android Studio / VS Code 在 Windows 上也按 LF 存。
+   例外只有 `.bat` / `.cmd`：仓里存 LF，签出成 CRLF（cmd.exe 认不了 LF）。
+3. 发现「内容没改却被标成改动」，先 `git diff --ignore-cr-at-eol` 确认是不是行尾：
+   是行尾就 `git checkout -- <文件>` 恢复 LF（或 `git add` 一次让其归一并确认暂存区为空）。
+   **不要**把这种整份改动的假 diff 直接提交。
+
 ## 校验规则
 
 任何代码修改、方案设计，若违反上面两条架构约束，或违反「样式层叠优先级」，禁止直接生成实现代码，先指出架构冲突点，并给出合规调整思路。

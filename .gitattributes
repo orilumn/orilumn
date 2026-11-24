@@ -1,0 +1,37 @@
+# 行尾策略：仓里一律存 LF，签出也一律是 LF，与开发机是什么系统无关。
+#
+# 为什么要有这个文件：Windows 上的编辑器 / 工具常常把换行存成 CRLF。没有 text 标记时，
+# git 会把「只差 CR」的整份文件当成删了重写，于是 git status / git diff 冒出一堆没改过
+# 内容的改动；这些 CR 一旦被提交，macOS/Linux 侧签出后又会整体再改一遍，来回横跳。
+#
+# 加了 text 标记后：入库前先把 CRLF 归一回 LF，所以 CRLF 永远进不了仓库历史，也不会
+# 变成「三万字删除 + 三万字新增」的假 diff。工作区里被写成 CRLF 时 git status 仍会
+# 提示 modified（字节确实变了），`git add` 一次就归一到原样、暂存区为空；想直接让
+# 工作区恢复成 LF 就 `git checkout -- <文件>`。见 AGENTS.md「行尾」一条。
+#
+# 注意：`eol=lf` 不等于「不许出现 CRLF」。少数格式必须保持 CRLF，见下面单独列出的行。
+* text=auto eol=lf
+
+# cmd.exe 解析 LF 结尾的批处理会出错（尤其是 goto/call 的定位），批处理必须 CRLF。
+# 仓里存 LF、签出成 CRLF，两边都正确。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：永不参与行尾转换与文本合并（text=auto 本也会按内容识别，这里写死免得误判）。
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.webp binary
+*.ico  binary
+*.icns binary
+*.jar  binary
+*.zip  binary
+*.apk  binary
+*.ttf  binary
+*.otf  binary
+*.woff  binary
+*.woff2 binary
+*.pdf  binary
+*.keystore binary
+*.jks  binary

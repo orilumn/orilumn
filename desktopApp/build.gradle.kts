@@ -1,5 +1,6 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.compose.desktop.application.dsl.TargetFormat
+import org.jetbrains.compose.desktop.application.tasks.AbstractJPackageTask
 
 plugins {
     alias(libs.plugins.kotlin.jvm)
@@ -70,8 +71,7 @@ compose.desktop {
             description = "Orilumn"
             vendor = "Orilumn"
             // 打包格式按当前 OS 选：Dmg 仅 macOS 合法，Deb/Rpm 仅 Linux 合法，Msi 仅 Windows 合法
-            // （jpackage 对不支持的格式会直接失败，故不能无条件列全；Windows 不列则 targetFormats
-            //  为空，:desktopApp:packageMsi 根本不会生成）。
+            // （jpackage 对不支持的格式会直接失败，故不能无条件列全）。
             //
             // 注意 TargetFormat.AppImage 不是 AppImage 单文件：它只是 jpackage --type app-image
             // 的便携目录别名（TargetFormat.outputDirName 对 AppImage 返回 "app"，fileExt 直接
@@ -101,9 +101,23 @@ compose.desktop {
                 // RPM 的 License 字段（jpackage --linux-rpm-license-type，缺省时 jpackage 用
                 // "unknown" 会被 rpmbuild 警告）：本仓 LICENSE 是 MIT，与声明一致。
                 rpmLicenseType = "MIT"
+                // --linux-shortcut：deb/rpm 才会装 /usr/share/applications/<name>.desktop 并调
+                // xdg-desktop-menu 注册。缺省是 false，jpackage 的 DesktopIntegration 只在
+                // 「有文件关联」或「显式要快捷方式」时才生成 .desktop —— 不加这行，装完在
+                // 应用菜单里根本找不到 Orilumn。
+                shortcut = true
+                // --linux-menu-group：.desktop 的 Categories 字段（freedesktop 主分类）。
+                // 不填则落到 jpackage 的默认分类，多数桌面环境会归到「其他」里。
+                menuGroup = "Office"
             }
             windows {
                 iconFile.set(project.file("icons/icon.ico"))
+                // --win-shortcut / --win-menu：装完后建桌面快捷方式与开始菜单项
+                // （menuGroup 同时让 Compose 认为「要菜单」，并作为开始菜单里的分组名）。
+                // 这两项只是「允许安装」；真正装不装由下面的 --win-shortcut-prompt 让用户勾选。
+                shortcut = true
+                menu = true
+                menuGroup = "Orilumn"
             }
             // jlink 默认按静态依赖推断模块，反射加载的 sqlite-jdbc 会被裁掉：
             // :desktopApp:suggestRuntimeModules 输出即此列表（含 java.sql，
@@ -116,6 +130,29 @@ compose.desktop {
                 "jdk.unsupported",
             )
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows MSI：让安装界面询问「要不要建快捷方式」
+//
+// Compose 1.11.1 的 windows{} 只有 shortcut / menu / menuGroup，对应 jpackage 的
+// --win-shortcut / --win-menu / --win-menu-group：加了就装，不加就不装，没有中间态。
+// 「装不装由用户在安装时勾选」靠的是 --win-shortcut-prompt，插件没暴露这个开关。
+//
+// 不重写打包任务，只往它的 freeArgs 里补这一个参数：Compose 的打包任务本来就把
+// freeArgs 原样接在 jpackage 命令行前面（AbstractJvmToolOperationTask.makeArgs），
+// 所以 jpackage 的其余参数、图标、UpgradeCode 派生、packageReleaseMsi 全都照旧，
+// 只多了一个开关。--win-shortcut / --win-menu 已在上面 windows{} 里打开；
+// jpackage 的安装向导会据此多一页，两个勾选框（开始菜单 / 桌面）默认都勾上，
+// 用户取消勾选就不建。
+// ---------------------------------------------------------------------------
+
+tasks.withType<AbstractJPackageTask>().configureEach {
+    // 只在 Msi 任务上加：Linux 的 deb/rpm 与 macOS 的 dmg 不认这个参数，jpackage 会直接报错。
+    // （Msi 任务只在 Windows 上注册，这里按名字收口。）
+    if (name.endsWith("Msi")) {
+        freeArgs.add("--win-shortcut-prompt")
     }
 }
 
@@ -143,3 +180,4 @@ tasks.register<Exec>("stampDmgVolumeIcon") {
         project.file("icons/icon.icns").absolutePath,
     )
 }
+

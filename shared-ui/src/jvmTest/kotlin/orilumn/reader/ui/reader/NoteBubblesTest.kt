@@ -772,10 +772,11 @@ class NoteBubblesTest {
     }
 
     @Test
-    fun `corner note in the page margin drops its leader through the margin`() {
-        // 真机「在几章中」（2026-11-23）：框在左侧页边空白里、选区贴行首。引线原来从框的右边
-        // 横出去，再在 x≈134.3 竖下来——正好夹在「在」（右缘 133）与「几」（左缘 134.8）之间，
-        // 读者看到的是「从字缝里切下去」。应改成顺着页边空白竖到底、再横着扎进首字左侧。
+    fun `corner note in the page margin goes right then down`() {
+        // 真机「在几章中」+「使用 val」（2026-11-24 用户定口）：框在左侧页边空白里、选区贴行首。
+        // 先竖后横那条（顺页边空白竖到底、再横着扎进首字左侧）读者说形状是反的：左上角的框
+        // 要**先向右画横线，再拐 90° 竖着下来**，箭头朝下指到首字上。竖段也不许扎进字缝——
+        // 上一版就是在 x≈134.3 从「在」（右缘 133）与「几」（左缘 134.8）中间切下去。
         val glyphs = listOf(
             rect(99f, 1328.7f, 133f, 1362.7f),
             rect(134.8f, 1330.7f, 167.8f, 1362.7f),
@@ -797,12 +798,15 @@ class NoteBubblesTest {
         assertTrue("页边距里的框应画两段 L，实际=$arrow", arrow is NoteArrow.Elbow)
         val pts = arrowPoints(arrow!!)
         assertEquals("L 是两段三个点，实际=$pts", 3, pts.size)
-        assertEquals("首段竖直离开框底", pts[0].x, pts[1].x, 0.5f)
-        assertEquals("框底出线", box.bottom, pts[0].y, 0.5f)
-        assertTrue("竖段要落在页边空白里（字缘左边），实际=${pts[0].x}", pts[0].x <= 99f)
-        assertEquals("末段横着扎进首字左侧", 99f, pts[2].x, 0.5f)
-        assertEquals("末段水平", pts[1].y, pts[2].y, 0.5f)
-        assertTrue("横段要够长，箭头才画得出来，实际=$pts", pts[2].x - pts[1].x >= 10f)
+        assertEquals("首段从框的右边横出去", box.right, pts[0].x, 0.5f)
+        assertEquals("先向右横", pts[0].y, pts[1].y, 0.5f)
+        assertTrue("横段要够长，箭头才画得出来，实际=$pts", pts[1].x - pts[0].x >= 10f)
+        assertEquals("再 90° 竖着下来", pts[1].x, pts[2].x, 0.5f)
+        assertEquals("箭头落在行盒上边", line.top, pts[2].y, 0.5f)
+        assertTrue(
+            "竖段要指在首字上，不许落进「在」与「几」之间的字缝，实际=${pts[1].x}",
+            pts[1].x > glyphs[0].left + 1f && pts[1].x < glyphs[0].right - 1f,
+        )
     }
 
     @Test

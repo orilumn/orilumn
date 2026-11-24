@@ -5808,8 +5808,17 @@ internal fun routeNoteArrow(
                 }
             }
         } else if (sideAware) {
-            // 规则第 13 条例外的四角版：框整块在页边空白里、整体在字上方 / 下方时，
-            // 引线固定走「页边距里的 L」，不交给四角走廊（那一竖会从两个字中间切下去）。
+            // 四角**先按 §6.1 的出边画 L**：左下 / 左上从框的**右边**横出去，再拐 90° 竖着
+            // 扎进字里（2026-11-24 用户定口，真机「使用 val」：左上角的框要先向右画横线，
+            // 再向下画箭头）。「页边距里的 L」（先竖后横、箭头从字侧面扎进去）形状是反的，
+            // 只在四角走廊画不出来时接手。
+            if (cornerFamily) {
+                cornerRoute()?.let { corner ->
+                    if (corner.clear && corner.crosses == 0) return finish(corner, null)
+                }
+            }
+            // 规则第 13 条例外的四角版：框整块在页边空白里、整体在字上方 / 下方、四角走廊
+            // 又画不出干净的两段时，改走「页边距里的 L」。
             marginLegRoute()?.let { return finish(it, null) }
             for (t in targets) {
                 for (entry in arrowSideEntries(

@@ -5741,17 +5741,31 @@ internal fun routeNoteArrow(
                     x > r.left - clear && x < r.right + clear
             }
         }
-        // 两端各试一次：选区墨迹并集的左右缘就是「选区外侧」那条线。
-        // 选区贴行首 / 行末时只走页边那一侧（规则第 13 条例外）：那一侧是一条长空白，竖段放在
-        // 那里才整段落在选区之外。另一侧是正文里的字缝，从那儿竖下去竖段就夹在两个字中间
-        // （真机「内 {}」：选区在行末，竖段却画进「内」与「{}」中间），这一档一律不试。
+        // ① 优先档（2026-11-24 用户两次定口，真机「使用 val」）：框的**右边**压在选区右端的
+        //    近旁（一个字以内）时，从框的右边横出去、在选区右端外侧竖着下来——先横后竖，
+        //    箭头朝下。框的右边越过选区右端（真机「内 {}」，框伸进右侧页边）或离得太远时
+        //    （横段会长得像横穿整行）这一档不成立，交给下面的页边距 L。
+        val rightGap = anchor.right - bubble.right
+        if (rightGap >= shortTail && rightGap <= max(reach, bubbleEm) && abs(boxEdge - sideY) >= shortTail) {
+            rawX[0] = bubble.right
+            rawY[0] = sideY
+            rawX[1] = anchor.right
+            rawY[1] = sideY
+            rawX[2] = anchor.right
+            rawY[2] = boxEdge
+            inkRects.maxByOrNull { it.right }?.let { attempt(it) }
+        }
+        out?.let { return it }
+        // ② 其余：两端各试一次。不贴页边距时两侧都试「先横后竖」；「先竖后横」只是后备，
+        // 且只走页边那一侧（规则第 13 条例外）：那一侧是一条长空白，竖段放在那里才整段落在
+        // 选区之外。另一侧是正文里的字缝，从那儿竖下去竖段就夹在两个字中间（真机「内 {}」：
+        // 选区在行末，竖段却画进「内」与「{}」中间），这一档一律不试。
         val marginOnly = marginSide != 0
         for (sign in if (marginOnly) intArrayOf(marginSide) else intArrayOf(1, -1)) {
             val face = if (sign > 0) anchor.right else anchor.left
             val g = if (sign > 0) inkRects.maxByOrNull { it.right } else inkRects.minByOrNull { it.left }
             g ?: continue
             // 先横后竖：从框的侧边横出去，竖着落到行盒边（框横向错开在一边时的首选）。
-            // 贴页边距时不走这条：它的竖段落在端字的外缘上，看着就是画进正文里。
             if (!marginOnly) {
                 val exitX = if (sign > 0) bubble.right else bubble.left
                 if (abs(exitX - face) >= shortTail && abs(boxEdge - sideY) >= shortTail) {

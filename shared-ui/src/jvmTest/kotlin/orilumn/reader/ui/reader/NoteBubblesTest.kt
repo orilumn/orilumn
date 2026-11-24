@@ -845,6 +845,46 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `top note above a short gap goes right then down at the selection end`() {
+        // 真机「使用 val」（2026-11-24 用户第二次定口，实测坐标）：框贴在行上方，缝只有 2~3px，
+        // 竖着进的末段画不出箭头。旧画法从框底下顺页边竖下去、再横着扎进首字左侧，读者说形状
+        // 是反的。要的是：从框的**右边**横出去、再 90° 竖着下来，箭头朝下落在选区末端外侧。
+        // 左侧那条缝其实不是空白（列表项的项目符号占着），竖段挤在那里就成了「贴边」。
+        val glyphs = listOf(
+            rect(150f, 1645.7f, 185f, 1679.7f),
+            rect(184.5f, 1647.7f, 215.5f, 1679.7f),
+            rect(238.4f, 1656.7f, 256.4f, 1675.7f),
+            rect(257.8f, 1655.7f, 274.8f, 1676.7f),
+            rect(276.3f, 1649.7f, 292.3f, 1676.7f),
+        )
+        val row = rect(150f, 1645.7f, 292.3f, 1679.7f)
+        val line = rect(100f, 1645.7f, 468f, 1679.7f)
+        val box = rect(109.4f, 1602.4f, 273f, 1643f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = listOf(row),
+            glyphs = glyphs,
+            lineH = noteLine,
+            side = NoteSide.ABOVE,
+            lineBoxes = listOf(line),
+            targetInk = glyphs,
+            marginSide = -1,
+        )
+        assertTrue("缝太短，仍要画两段 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("L 是两段三个点，实际=$pts", 3, pts.size)
+        assertEquals("横段从框的右边离开，实际=$pts", box.right, pts[0].x, 0.5f)
+        assertEquals("先向右横", pts[0].y, pts[1].y, 0.5f)
+        assertTrue("横段要向右走、够长才画得出箭头，实际=$pts", pts[1].x - pts[0].x >= 10f)
+        assertEquals("再 90° 竖着下来", pts[1].x, pts[2].x, 0.5f)
+        assertTrue("箭头朝下", pts[2].y > pts[1].y + 1f)
+        assertTrue(
+            "竖段要落在选区末端的外侧，不许从首字左侧扎进去，实际=${pts[1].x}",
+            pts[1].x >= 292.3f - 0.5f,
+        )
+    }
+
+    @Test
     fun `top left note leaves its box on the right side`() {
         // 真机「使用 val」（2026-11-24 用户定口）：框摆在左上角，近端那一头（选区行首）
         // 缩在框背后。旧画法从框的**左边**横出去、再竖下来，读者看到的是「引线从最左边拉过来」。

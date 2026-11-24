@@ -30,6 +30,8 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
 import java.awt.Dimension
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.io.File
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowDecoration
@@ -254,6 +256,12 @@ fun main(args: Array<String>) {
         // 缩放光标、拖动、全屏、透明底子一样样自己补，每一样都要跟平台惯例对齐，代价远大于收益。
         // prefs 存的就是窗口尺寸与左上角。
         val restoredGeometry = remember { restoreWindowGeometry(store) }
+        // TEMP-DBG（窗口尺寸排查，用完删除）
+        orilumn.reader.io.Logger.d(
+            "Orilumn.WIN",
+            "restore w=${restoredGeometry.widthPx} h=${restoredGeometry.heightPx}" +
+                " pos=${restoredGeometry.position} placement=${restoredGeometry.placement}",
+        )
         val windowState = rememberWindowState(
             placement = restoredGeometry.placement,
             width = restoredGeometry.widthPx.dp,
@@ -273,6 +281,13 @@ fun main(args: Array<String>) {
         }
         LaunchedEffect(Unit) {
             delay(2000)
+            // TEMP-DBG（窗口尺寸排查，用完删除）
+            if (!geometryApplied.value) {
+                orilumn.reader.io.Logger.w(
+                    "Orilumn.WIN",
+                    "restore fallback：2s 到仍未匹配，放行落盘",
+                )
+            }
             geometryApplied.value = true
         }
         // 移动/调整/最大/还原后 500ms 落盘（IO 线程，不挡 UI；下次启动即原地恢复）。
@@ -290,6 +305,11 @@ fun main(args: Array<String>) {
                     val placement = windowState.placement
                     val size = windowState.size
                     val pos = windowState.position
+                    // TEMP-DBG（窗口尺寸排查，用完删除）
+                    orilumn.reader.io.Logger.d(
+                        "Orilumn.WIN",
+                        "persist-debounce size=$size pos=$pos placement=$placement fullscreen=$fullscreen",
+                    )
                     withContext(Dispatchers.IO) {
                         persistWindowGeometry(store, fullscreen, placement, size, pos)
                     }
@@ -301,6 +321,12 @@ fun main(args: Array<String>) {
         val appIcon = painterResource("icon.png")
         Window(
             onCloseRequest = {
+                // TEMP-DBG（窗口尺寸排查，用完删除）
+                orilumn.reader.io.Logger.d(
+                    "Orilumn.WIN",
+                    "persist-close size=${windowState.size} pos=${windowState.position}" +
+                        " placement=${windowState.placement} fullscreen=${chrome.fullscreen}",
+                )
                 // 关窗前同步落盘一次：刚拖过窗口、还没等满 500ms 防抖就关掉，几何也不丢。
                 persistWindowGeometry(
                     store,
@@ -343,11 +369,47 @@ fun main(args: Array<String>) {
                     w.minimumSize = Dimension(MinContentW, MinContentH)
                 }
             }
+            // TEMP-DBG（窗口尺寸排查，用完删除）：谁在改窗口 —— 每次 AWT 层的缩放/移动都打一条栈。
+            val winTraceTarget = remember { arrayOfNulls<java.awt.Window>(1) }
+            SideEffect {
+                val w = awtWin ?: return@SideEffect
+                if (winTraceTarget[0] === w) return@SideEffect
+                winTraceTarget[0] = w
+                fun frames(): String = Throwable().stackTrace.drop(2).take(16).joinToString(" <- ") {
+                    "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+                }
+                w.addComponentListener(
+                    object : ComponentAdapter() {
+                        override fun componentResized(e: ComponentEvent?) {
+                            orilumn.reader.io.Logger.d(
+                                "Orilumn.WIN",
+                                "RESIZE ${w.width}x${w.height}@${w.x},${w.y} stack=${frames()}",
+                            )
+                        }
+
+                        override fun componentMoved(e: ComponentEvent?) {
+                            orilumn.reader.io.Logger.d(
+                                "Orilumn.WIN",
+                                "MOVE ${w.width}x${w.height}@${w.x},${w.y} stack=${frames()}",
+                            )
+                        }
+                    },
+                )
+            }
             // 恢复已落到真实窗口上：尺寸对上了才允许落盘（见 [geometryApplied]）。
             // 以 `windowState.size` 为 key，窗口尺寸变化时重新检查。
-            LaunchedEffect(windowState.size) {
-                if (geometryApplied.value) return@LaunchedEffect
+            LaunchedEffect(windowState.size, windowState.position) {
                 val w = awtWin ?: return@LaunchedEffect
+                // TEMP-DBG（窗口尺寸排查，用完删除）
+                orilumn.reader.io.Logger.d(
+                    "Orilumn.WIN",
+                    "awt=${w.width}x${w.height} at=${w.x},${w.y}" +
+                        " content=${(w as? javax.swing.JFrame)?.contentPane?.width}x" +
+                        "${(w as? javax.swing.JFrame)?.contentPane?.height}" +
+                        " insets=${w.insets} state=${windowState.size} pos=${windowState.position}" +
+                        " applied=${geometryApplied.value}",
+                )
+                if (geometryApplied.value) return@LaunchedEffect
                 if (w.width == restoredGeometry.widthPx && w.height == restoredGeometry.heightPx) {
                     geometryApplied.value = true
                 }

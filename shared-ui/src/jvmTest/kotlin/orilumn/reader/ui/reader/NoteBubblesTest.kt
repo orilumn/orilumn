@@ -5240,6 +5240,47 @@ class NoteBubblesTest {
         assertTrue("are 与 of 不许重叠：$dbg", !are.overlaps(of))
         assertTrue("are 与 of 该在同一档：$dbg", abs(are.top - of.top) <= 1f)
     }
+
+    /**
+     * 真机复现（2026-11-24「在几章中」）：紧邻的右下明明是空的，批注却被摆到下方 1em 处。
+     *
+     * 这一屏的下一行很短（文字到 852 就结束），它右侧那块空白从行距里一直连到下面。
+     * 「正下」那族的框落在空白带最左端时，左缘（854）已经越过「首字偏右一个字」（807），
+     * 按最终几何它够得上「右下」的资格；但它比真正贴身的那格往左 13px，
+     * 旧名次先比横向偏移，于是这个**往下推了 1em** 的框排到了前面。
+     * 这里锁住：斜向内部先比真实距离，贴身那格赢。
+     */
+    @Test
+    fun `the below right corner hugging the line beats the one pushed a line down`() {
+        val lines = listOf(
+            NoteTextLine(rect(163f, 1082f, 985f, 1133f), blockId = 0, index = 0, inkTop = 1090f, inkBottom = 1127f),
+            NoteTextLine(rect(100f, 1167f, 1128f, 1218f), blockId = 0, index = 1, inkTop = 1175f, inkBottom = 1210f),
+            NoteTextLine(rect(100f, 1218f, 1128f, 1269f), blockId = 0, index = 2, inkTop = 1226f, inkBottom = 1261f),
+            NoteTextLine(rect(100f, 1269f, 852f, 1320f), blockId = 0, index = 3, inkTop = 1276f, inkBottom = 1312f),
+            NoteTextLine(rect(100f, 1320f, 1108f, 1371f), blockId = 0, index = 4, inkTop = 1328f, inkBottom = 1363f),
+            NoteTextLine(rect(100f, 1371f, 1108f, 1422f), blockId = 0, index = 5, inkTop = 1379f, inkBottom = 1414f),
+        )
+        val b = place(
+            notes = listOf(noteInk(8, listOf(rect(785f, 1218f, 922f, 1269f)), "用几章来")),
+            textInk = lines.map { it.rect },
+            textLines = lines,
+            contentLeft = 100f,
+            contentRight = 1213f,
+            contentBottom = 1507f,
+            pageRight = 1264f,
+            pageBottom = 1507f,
+            fontPx = 22f,
+        ).single()
+        assertTrue(
+            "该紧贴本行下沿（top≈1271），不是被推到下方 1em（≈1291）；实际 top=${b.topPx} left=${b.leftPx}",
+            b.topPx < 1276f,
+        )
+        assertTrue(
+            "该落在右下角（左缘越过首字偏右一个字＝807）；实际 left=${b.leftPx}",
+            b.leftPx > 807f,
+        )
+    }
+
     /**
      * 真机复现（桌面样例页，2026-11-23）：「are」与「of」两条斜向框**并排**在同一档里
      * （一条贴行左、一条贴行右，横向谁也不挡谁的引线）。它们不该被「中心在外、两侧靠内」

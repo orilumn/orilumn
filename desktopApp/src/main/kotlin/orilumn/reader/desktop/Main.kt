@@ -29,7 +29,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalDensity
 import java.awt.Dimension
 import java.io.File
 import androidx.compose.ui.window.Window
@@ -44,6 +43,7 @@ import androidx.compose.ui.window.WindowPosition
 import java.awt.GraphicsEnvironment
 import java.awt.Rectangle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -96,8 +96,9 @@ private const val MinContentH = 300
 /**
  * 所有屏幕的包围盒（窗口系统坐标，单位与 AWT 组件一致；取不到屏幕信息时返回空表）。
  *
- * **不要再乘缩放系数**：Compose 桌面端的 density 恒为 1，`WindowState` 的「dp」数值就是
- * 窗口像素/窗口系统坐标，而 AWT 的 `GraphicsConfiguration.bounds` 也是同一套坐标。
+ * **不要再乘缩放系数**：`WindowState` 的「dp」数值与 AWT 窗口坐标是同一套（窗口点），
+ * 而 AWT 的 `GraphicsConfiguration.bounds` 也是同一套坐标。`LocalDensity`（Retina 上 = 2）
+ * 只用于内容渲染，拿 `roundToPx()` 去算窗口尺寸 / `minimumSize` 会翻倍。
  */
 private fun screenBounds(): List<Rectangle> = runCatching {
     GraphicsEnvironment.getLocalGraphicsEnvironment()
@@ -136,8 +137,8 @@ private fun maxWindowSize(): Pair<Int, Int> = runCatching {
 /**
  * 上次运行的窗口几何与放置态（平台层·桌面壳）。
  *
- * 尺寸/位置存的就是**窗口像素**：Compose 桌面端 density 恒为 1，`WindowState` 的 dp 数值
- * 被 CMP 直接当像素 `setSize` / `setLocation`，所以原样读写即可逐像素复原。这一点很要紧 ——
+ * 尺寸/位置存的就是**窗口点**：`WindowState` 的 dp 数值被 CMP 直接当窗口坐标
+ * `setSize` / `setLocation`（不乘屏幕缩放），所以原样读写即可逐像素复原。这一点很要紧 ——
  * 分页缓存键带版心宽高（像素），窗口差 1 像素就是另一套键，命中不了磁盘表就得整章重排。
  */
 internal data class RestoredWindowGeometry(
@@ -262,6 +263,18 @@ fun main(args: Array<String>) {
         // 窗口级状态 + 全屏命令（平台层·桌面壳）：快捷键挂在 Window 参数上、拿不到窗口对象，
         // 故用这个 holder 把内容里的窗口挂上来（见 DesktopWindowChrome 的 KDoc）。
         val chrome = remember { DesktopWindowChrome() }
+        // 恢复是否已经落到真实窗口上（平台层·桌面壳）。
+        // 窗口刚创建时停在最小尺寸（240×300），防抖若抢在恢复生效前跑一次，就会把这个尺寸
+        // 当成读者调的窗口大小存回去 —— 下次启动还是小窗，再也回不到读者原来的尺寸。
+        // 故：浮动窗口要先看到真实尺寸等于存档尺寸才允许落盘；最大化 / 全屏本身不记尺寸，
+        // 直接放行。另设 2 秒兜底，防止系统把存档尺寸钳掉（换小屏）后一直不落盘。
+        val geometryApplied = remember {
+            mutableStateOf(restoredGeometry.placement != WindowPlacement.Floating)
+        }
+        LaunchedEffect(Unit) {
+            delay(2000)
+            geometryApplied.value = true
+        }
         // 移动/调整/最大/还原后 500ms 落盘（IO 线程，不挡 UI；下次启动即原地恢复）。
         // 全屏期间不落盘：那时 windowState.size 已是整屏尺寸，落盘会把用户原来的窗口大小冲掉。
         LaunchedEffect(windowState, chrome) {
@@ -270,6 +283,8 @@ fun main(args: Array<String>) {
             }
                 .debounce(500)
                 .collect {
+                    // 恢复还没落到真实窗口上（窗口仍在最小尺寸）时先不记：见上方 [geometryApplied]。
+                    if (!geometryApplied.value) return@collect
                     // 状态在 UI 线程上取快照，再交给 IO 落盘（不要在 IO 线程读 Compose 状态）。
                     val fullscreen = chrome.fullscreen
                     val placement = windowState.placement
@@ -317,16 +332,24 @@ fun main(args: Array<String>) {
             SideEffect { chrome.attach(window, windowState) }
             // 最小窗口尺寸兜底：防止拖到比版心下限还小导致 contentH ≤ 0。
             // 取值见 [MinContentW]/[MinContentH]（与上方读存档的钳制下限同源）。
-            val densityMin = LocalDensity.current
             val awtWin = window as? java.awt.Window
             SideEffect {
                 val w = awtWin ?: return@SideEffect
-                with(densityMin) {
-                    val minW = MinContentW.dp.roundToPx()
-                    val minH = MinContentH.dp.roundToPx()
-                    if (w.minimumSize.width != minW || w.minimumSize.height != minH) {
-                        w.minimumSize = Dimension(minW, minH)
-                    }
+                // 不乘 density：`WindowState` 的 dp 数值与 AWT 窗口坐标是同一套（dp 即窗口点），
+                // 屏幕缩放系数只影响内容渲染（Retina 上 LocalDensity = 2）。乘了 roundToPx 会让
+                // 最小窗口在 Retina 上翻倍成 480×600，读者拖小到下限后这个值又被当成「上次的尺寸」
+                // 存回去 —— 此后每次启动都是那个翻倍的小窗口。
+                if (w.minimumSize.width != MinContentW || w.minimumSize.height != MinContentH) {
+                    w.minimumSize = Dimension(MinContentW, MinContentH)
+                }
+            }
+            // 恢复已落到真实窗口上：尺寸对上了才允许落盘（见 [geometryApplied]）。
+            // 以 `windowState.size` 为 key，窗口尺寸变化时重新检查。
+            LaunchedEffect(windowState.size) {
+                if (geometryApplied.value) return@LaunchedEffect
+                val w = awtWin ?: return@LaunchedEffect
+                if (w.width == restoredGeometry.widthPx && w.height == restoredGeometry.heightPx) {
+                    geometryApplied.value = true
                 }
             }
             MaterialTheme {

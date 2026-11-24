@@ -1341,6 +1341,35 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `covering rule only sends the left half of the row to the left corner`() {
+        // 真机「详细 / 讨论」（2026-11-24 用户定口）：整句自然宽会横跨右边那条的选区时，
+        // 只有**文字本来就靠左**的那条才改走左侧（规则第 8 条的本意：把近的那片空白留给
+        // 右边那条）。锚点自己就在这一行右半时，右下角本来就是它的，不能被改判到左边
+        // ——左边被先放的那条挡住以后，它会横着滑回选区正下方 2px，读者看到的就是
+        // 「右边明明空着，批注却贴在自己脚下」。
+        val lines = listOf(NoteTextLine(rect = rect(100f, 1200f, 1200f, 1250f), blockId = 0, index = 0))
+        val list = noteCandidates(
+            note = noteInk(1, listOf(rect(874f, 1200f, 941f, 1250f)), "就是具体"),
+            lines = lines,
+            freeRects = listOf(rect(100f, 1250f, 1344f, 1600f)),
+            metrics = noteMetrics,
+            rowSpan = mapOf(0 to rect(537f, 1200f, 1042f, 1250f)),
+            rightInk = listOf(rect(974f, 1200f, 1042f, 1250f)),
+        )
+        val best = list.sortedWith(noteCandidateOrder(rightTaken = false)).first()
+        assertTrue(
+            "行右半那条要走右下角，实际=${best.side}@${best.rect}",
+            best.side == NoteSide.BELOW_RIGHT || best.side == NoteSide.ABOVE_RIGHT,
+        )
+        assertEquals(
+            "右下角的横向基准是「首字右移一个字」，实际 left=${best.rect.left}",
+            874f + noteMetrics.em / NOTE_BUBBLE_FONT_RATIO,
+            best.rect.left,
+            0.5f,
+        )
+    }
+
+    @Test
     fun `covering note still prefers the upper right when the row's last note is already on the right`() {
         // 规则第 8 条例外（2026-10-25 用户定口）：本条右侧只剩本行最右那条、且它已经
         // 放在本行正右（框在行右，不占这一带空白）⇒ 本条回到右上优先，不再先走左侧。

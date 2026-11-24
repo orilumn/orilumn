@@ -1221,10 +1221,15 @@ internal fun noteCandidates(
     // 只在**这一条自己的基准行**上判；判据用整句一行的自然宽，不看某个候选碰巧折成多宽。
     val coversRightText = covering
         ?: noteCoversRightText(note, lines, rightInk, metrics, charWidthPx, sizer)
+    // 规则第 8 条的让位只给**文字靠左的那条**（2026-11-24 用户定口，真机「详细 / 讨论」）：
+    // 本条锚点自己在这一段批注里就靠右时，右下那片空白本来就是它的。整句自然宽会横跨右侧
+    // 那条，不该因此把这条整个改到左边去——左下被先放的那条挡住，再横着滑回选区正下方
+    // 两像素处，读者看到的就是「右下明明空着，批注却贴在自己正下方」。
+    val coveringLeftOnly = coversRightText && anchorMidX <= groupMidX
 
-    fun sideRankOf(side: NoteSide): Int = when {
+    fun sideRankOf(side: NoteSide, coveringNow: Boolean = coveringLeftOnly): Int = when {
         // 会遮住右侧文字的，先左侧、再右侧，规则 3 / 4 的「首选一侧」也让位给它。
-        coversRightText -> coveringSideRank(side)
+        coveringNow -> coveringSideRank(side)
         leftFirst && side == NoteSide.LEFT -> NOTE_SIDE_RANK_SIDE_FIRST
         rightFirst && side == NoteSide.RIGHT -> NOTE_SIDE_RANK_SIDE_FIRST
         // 首选那一列放不下（缩进只让出几像素）时，退回另一侧的正左 / 正右，再轮到四角。

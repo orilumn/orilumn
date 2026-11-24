@@ -5480,11 +5480,17 @@ internal fun routeNoteArrow(
              * 换一头 / 换个字缝还能画。
              */
             fun attemptsAt(xEntry: Float): ArrowPath? {
-                val edgeX = when {
-                    xEntry <= bubble.left - NOTE_GEOM_EPS -> bubble.left
-                    xEntry >= bubble.right + NOTE_GEOM_EPS -> bubble.right
-                    else -> null
-                } ?: return null
+                // 出边按 §6.1：左下 / 左上从**右边**横出去，右下 / 右上从**左边**横出去——
+                // 一律从朝正文那一侧离开框。入口落在框的另一侧（框横跨选区、选区的开头 /
+                // 末尾缩在框背后）时，不从背面绕（真机「使用 val」：框明明摆在左上角，引线却
+                // 从最左边拉过来，多横穿整个框），改由框外侧那个拐点进去（见下面的 turnGap）。
+                val exitRight = side == NoteSide.BELOW_LEFT || side == NoteSide.ABOVE_LEFT
+                if (exitRight) {
+                    if (xEntry < bubble.right - NOTE_GEOM_EPS) return null
+                } else {
+                    if (xEntry > bubble.left + NOTE_GEOM_EPS) return null
+                }
+                val edgeX = if (exitRight) bubble.right else bubble.left
                 if (abs(xEntry - edgeX) < minCorridor) return null
                 var out: ArrowPath? = null
                 for (y in ys) {
@@ -5675,22 +5681,126 @@ internal fun routeNoteArrow(
     val belowFamily = side == NoteSide.BELOW || side == NoteSide.ABOVE
     val sideAware = side != null && side != NoteSide.OTHER && !belowFamily
 
+    /**
+     * 正上 / 正下竖缝短到画不下箭头时的折线（规则第 11 条，2026-11-23 用户定口「of」）。
+     *
+     * 框沿与行盒之间只剩两三个像素时，竖着进的末段短到画不出箭头；这时只画两段：
+     *
+     * - **先横后竖**（规则第 2 条的四角口径，2026-11-24 用户定口）：从框的**侧边**横出去，
+     *   竖着落到行盒边。整条线都在行盒外，高亮底色一点不碰——框横向错开在一边
+     *   （左上 / 右上那一类）时走这条。
+     * - **先竖后横**：框横跨选区、横着够不到选区外侧时，从框边竖下来，在**选区墨迹之外**的
+     *   空白里竖过字高，再横着扎进选区端字的侧面。竖段必须整段在选区外：中间那些字的
+     *   「侧面」就在选区里，从两个字之间切下去就是压在正文上（旧画法：真机「内 {}」竖段
+     *   落在「内」与「{}」之间；「使用 val」横段挤进项目符号与首字之间那条十几像素的缝里）。
+     *
+     * 两端、两种折法都量一遍，按「通畅 → 更短」择优（规则第 1 / 6 / 8 条）。
+     * 都画不成就返回 `null`，调用方照旧按「竖着进」枚举。
+     */
+    fun shortGapL(): ArrowPath? {
+        if (shortTail <= 0f) return null
+        val first = targets.firstOrNull() ?: return null
+        val below = side == NoteSide.BELOW
+        val above = !below
+        val boxEdge = verticalEntryEdge(first.box, above = above, noTouch = first.noTouch)
+        val gap = if (below) bubble.top - boxEdge else boxEdge - bubble.bottom
+        if (gap >= shortTail) return null
+        val reach = max(shortTail, bubbleEm * 0.5f)
+        val pad = max(bubbleEm * 0.5f, NOTE_GEOM_EPS)
+        val bandLo = bubble.left + pad
+        val bandHi = bubble.right - pad
+        // 横段离开框的那条边上的纵向落点：离框角至少 0.5em（规则第 4 条）。
+        val sideY = clampInset(bubble.top + pad, bubble.bottom - pad, bubble.center.y)
+        val midY = clampInset(anchor.top, anchor.bottom, anchor.center.y)
+        val facingY = if (below) bubble.top else bubble.bottom
+        var out: ArrowPath? = null
+        fun attempt(g: Rect) {
+            val m = simplifyInto(rawX, rawY, 3, ptsX, ptsY)
+            if (m < 3) return
+            // 指到哪个字，就从它的边上进：它自己不算「穿字」（整行字高不齐时同理）。
+            val own = rectUnion(inkRects.filter { it != g }.ifEmpty { listOf(g) })
+            val route = measureArrowRoute(
+                ptsX, ptsY, m, order++, first.index, bubble, drawnIndex, hugDistance,
+                side = side, own = own, shortTail = shortTail,
+            ) ?: return
+            // 高亮标注的引线不得画进选区内部（规则第 9 条）：不通畅的候选一概不用。
+            if (!route.clear || route.crosses > 0) return
+            if (route.betterThan(out)) out = route
+        }
+        /**
+         * 页边那条空白是否真的空着（见下）：竖段纵向范围内，横向 1/4 字以内不许有别的墨。
+         * 项目符号、图标、邻框都算——竖段贴着它们走，读者看到的就是「挤在字边上」。
+         */
+        fun marginCorridorClear(x: Float, y0: Float, y1: Float): Boolean {
+            val lo = min(y0, y1)
+            val hi = max(y0, y1)
+            val clear = max(bubbleEm * ARROW_SOLID_CLEAR_EM, NOTE_GEOM_EPS)
+            return obstacles.none { o ->
+                val r = o.rect
+                r.bottom > lo - NOTE_GEOM_EPS && r.top < hi + NOTE_GEOM_EPS &&
+                    x > r.left - clear && x < r.right + clear
+            }
+        }
+        // 两端各试一次：选区墨迹并集的左右缘就是「选区外侧」那条线。
+        // 选区贴行首 / 行末时只走页边那一侧（规则第 13 条例外）：那一侧是一条长空白，竖段放在
+        // 那里才整段落在选区之外。另一侧是正文里的字缝，从那儿竖下去竖段就夹在两个字中间
+        // （真机「内 {}」：选区在行末，竖段却画进「内」与「{}」中间），这一档一律不试。
+        val marginOnly = marginSide != 0
+        for (sign in if (marginOnly) intArrayOf(marginSide) else intArrayOf(1, -1)) {
+            val face = if (sign > 0) anchor.right else anchor.left
+            val g = if (sign > 0) inkRects.maxByOrNull { it.right } else inkRects.minByOrNull { it.left }
+            g ?: continue
+            // 先横后竖：从框的侧边横出去，竖着落到行盒边（框横向错开在一边时的首选）。
+            // 贴页边距时不走这条：它的竖段落在端字的外缘上，看着就是画进正文里。
+            if (!marginOnly) {
+                val exitX = if (sign > 0) bubble.right else bubble.left
+                if (abs(exitX - face) >= shortTail && abs(boxEdge - sideY) >= shortTail) {
+                    rawX[0] = exitX
+                    rawY[0] = sideY
+                    rawX[1] = face
+                    rawY[1] = sideY
+                    rawX[2] = face
+                    rawY[2] = boxEdge
+                    attempt(g)
+                }
+            }
+            // 先竖后横：竖段在选区外侧的空白里竖过字高，再横着扎进端字的侧面。
+            // 竖段要落在框边 0.5em 内缩带里，否则「从框底下竖下去」这一笔画不出来。
+            // 贴页边距时按布点伸出去的那一截夹进来（伸出的宽度就是这个走廊宽），
+            // 并且横段得画得下箭头——第 11 条的另一半：末折要看得见。
+            val legX = if (marginOnly) clampInset(bandLo, bandHi, face + sign * reach) else face + sign * reach
+            if (legX < bandLo - NOTE_GEOM_EPS || legX > bandHi + NOTE_GEOM_EPS) continue
+            if (marginOnly && abs(face - legX) < shortTail) continue
+            // 页边那条空白得真是**一条走廊**：竖段两侧 1/4 字内不许有别的东西（项目符号、
+            // 图标、邻框）——挤在项目符号与首字之间那条十几像素的缝里，读者看到的就是
+            // 「引线画进了正文」（真机「使用 val」：列表项的行首，左边页边是项目符号不是空白）。
+            if (marginOnly && !marginCorridorClear(legX, facingY, midY)) continue
+            rawX[0] = legX
+            rawY[0] = facingY
+            rawX[1] = legX
+            rawY[1] = midY
+            rawX[2] = face
+            rawY[2] = midY
+            attempt(g)
+        }
+        return out
+    }
+
     /** 按「允不允许突破 0.5em」把端点组合枚举一遍；拿到无条件最优的直线就当场收尾。 */
     fun enumerate(breakoutAllowed: Boolean): NoteArrow? {
         if (belowFamily) {
+            // 竖缝短到画不下箭头：只画两段 L（竖段一定在选区外），见 [shortGapL]。
+            shortGapL()?.let { return finish(it, null) }
             // 正下 / 正上：竖着进出，横向优先落在「框与选区的重叠段」里（规则第 1 条）。
             val below = side == NoteSide.BELOW
             for (t in targets) {
                 for (entry in arrowBelowEntries(
                     bubble, t.glyph, anchor, t.box, below,
                     t.obstacleRects, breakoutAllowed, t.noTouch,
-                    shortGap = shortTail,
-                    em = bubbleEm,
-                    marginSide = marginSide,
                 )) {
                     for (exit in arrowBelowExits(
                         bubble, below, entry, bubbleEm, t.obstacleRects, breakoutAllowed,
-                        t.bendRects, shortGap = shortTail,
+                        t.bendRects,
                     )) {
                         tryRoute(exit, entry, t)
                     }
@@ -6413,19 +6523,6 @@ private fun arrowBelowEntries(
     breakoutAllowed: Boolean = false,
     /** 划线标注的禁触带（这一行的墨迹 + 这条线）：可以进得行盒，但停在它外侧。 */
     noTouch: Rect? = null,
-    /**
-     * 竖缝短到画不下箭头时的门槛（[NOTE_ARROW_UNDRAWABLE_LINES]）：这时补一条**横着进字侧面**
-     * 的入口，改画「框底下去 → 横着扎进字的侧面」的 L（规则第 11 条 / 2026-11-23 用户定口
-     * 「of」：直着下去只剩两像素，读者看不到箭头）。
-     */
-    shortGap: Float = 0f,
-    /** 旁注字号（= 行高 / 行距比例；缺省 0 = 退回按框高取走廊宽度，见 [NoteMetrics.lineH]）。 */
-    em: Float = 0f,
-    /**
-     * 选区文字在这行贴哪一侧的页边空白（见 [noteRowMarginSide]）：非 `0` 时 L 只走那一侧。
-     * 不指定时按「字心在框心哪一边」猜——框在页边距那一侧时会把 L 猜进正文里。
-     */
-    marginSide: Int = 0,
 ): List<ArrowEntry> {
     val y = verticalEntryEdge(box, above = !below, noTouch = noTouch)
     val h = glyph.height
@@ -6436,48 +6533,8 @@ private fun arrowBelowEntries(
     // 行盒 = 所选文字的盒子（2026-10-28 定口）：整条边就是选区墨迹的左右两端；
     // 首选区间（框 ∩ 选区各收 0.5em）走不通时，允许突破到这两端（规则第 4 条）。
     val edge = if (below) ARROW_EDGE_BOTTOM else ARROW_EDGE_TOP
-    // 竖缝太短（短于「画得下箭头」的末段长度，见 NOTE_ARROW_UNDRAWABLE_LINES）：**竖着进去这一族
-    // 入口整族不生成**。缝里竖着走的那一段必然短于箭头，第 11 条一省末折，读者看到的就是一条
-    // 悬在框底下、朝旁边指过去的横线，或者一根只戳了两像素的短线（真机「of」：竖段 7.9px，
-    // 箭头被夹到 7px；2026-11-23 用户定口：「直接往下画这么短，为什么不在右边画 L 型？」）。
-    // 改只留「横着扎进字侧面」的入口：引线从框边竖下去、过了字的高度再横着扎进字的侧面，
-    // 两段都够长，画出来是一个 L。
-    // 走哪一侧：贴页边距的选区（[marginSide]）只走页边那一侧——那里是一条长空白，
-    // 竖段可以一直走到字的高度；那一侧在框边上放不下时仍按字在框心哪一边猜。
-    val gap = if (below) bubble.top - y else y - bubble.bottom
-    if (shortGap > 0f && gap < shortGap) {
-        val offset = max(shortGap, if (em > 0f) em * 0.5f else bubble.height * 0.5f)
-        val pad = max(if (em > 0f) em * 0.5f else bubble.height * 0.5f, NOTE_GEOM_EPS)
-        val rightFits = glyph.right + offset <= bubble.right - pad
-        val leftFits = glyph.left - offset >= bubble.left + pad
-        // 贴页边距的选区（[marginSide]）只走页边那一侧：另一侧是正文里的字缝，
-        // 从那里「竖过字的高度再横扎进字侧」必然横穿前面几个字，不如退回竖进（第 8 条）。
-        val side = when {
-            marginSide > 0 && rightFits -> 1
-            marginSide < 0 && leftFits -> -1
-            else -> {
-                val preferRight = glyph.center.x >= bubble.center.x
-                when {
-                    preferRight && rightFits -> 1
-                    !preferRight && leftFits -> -1
-                    rightFits -> 1
-                    leftFits -> -1
-                    else -> 0
-                }
-            }
-        }
-        if (side != 0) {
-            val x = if (side > 0) glyph.right else glyph.left
-            val ySide = clampInset(glyph.top, glyph.bottom, glyph.center.y)
-            return listOf(
-                ArrowEntry(
-                    Offset(x, ySide), horizontal = true,
-                    lo = ySide, hi = ySide, edgeLo = glyph.top, edgeHi = glyph.bottom,
-                    edge = if (side > 0) ARROW_EDGE_RIGHT else ARROW_EDGE_LEFT,
-                ),
-            )
-        }
-    }
+    // 竖缝短到画不下箭头时这里不生成入口：那一族整族交给 [routeNoteArrow] 的 `shortGapL`
+    // （两段 L，竖段一定落在选区外，见那里的注释）。
     return edgePoints(
         anchor.left, anchor.right, bandA, bandB,
         floatArrayOf(bubble.center.x), obstacles, vertical = true,
@@ -6509,8 +6566,6 @@ private fun arrowBelowExits(
     breakoutAllowed: Boolean = false,
     /** 图形 / 表格 / 别的批注框：沿它们的边取点时退开一点（见 [ARROW_SOLID_CLEAR_EM]）。 */
     solids: List<Rect> = emptyList(),
-    /** 画得下箭头所需的末段长度（见 [arrowBelowEntries] 的 `shortGap`）：横段至少这么长。 */
-    shortGap: Float = 0f,
 ): List<ArrowExit> {
     val out = LinkedHashSet<ArrowExit>()
     val clearPx = arrowSolidClearPx(em, solids)
@@ -6520,26 +6575,6 @@ private fun arrowBelowExits(
     val bandYA = bubble.top + pad
     val bandYB = bubble.bottom - pad
     val facingY = if (below) bubble.top else bubble.bottom
-    // 竖缝短到画不下箭头时（[arrowBelowEntries] 的 `shortGap`），入口改成了「横着扎进字的侧面」，
-    // 这里必须配一条**同侧的竖出口**：从朝字那条边、字外侧 `max(shortGap, 0.5em)` 处竖着下去
-    // （上来），过了字的高度再横着扎进字的侧面——整条引线就是一个「L」（规则第 11 条 /
-    // 2026-11-23 用户定口「of」：直着下去只剩两像素，为什么不在右边画 L 型）。
-    // 缺了这一条，出口只能落在框的远边或正上方，读者看到的是「从最左边拉过来」的之字形。
-    if (entry.horizontal) {
-        val sign = if (entry.edge == ARROW_EDGE_RIGHT) 1f else -1f
-        val reach = max(shortGap, if (em > 0f) em * 0.5f else 0f)
-        val x = entry.point.x + sign * max(reach, NOTE_GEOM_EPS)
-        if (x >= bandXA && x <= bandXB) {
-            out += ArrowExit(
-                Offset(x, facingY), horizontal = false,
-                // 钉死在「字外侧」这个 x 上：这一条出口的用处就是画出对齐字的那个 L，
-                // 允许它沿边滑动只会滑回框中心、把 L 又拉成之字形。
-                lo = x, hi = x,
-                edgeLo = bubble.left, edgeHi = bubble.right,
-                edge = if (below) ARROW_EDGE_TOP else ARROW_EDGE_BOTTOM,
-            )
-        }
-    }
     // 竖出口：x 候选取几何点（对齐入口 / 框中心 / 障碍边 / 边端），不再按 1/4、3/4 乱试。
     // 出口沿框的上边取点时，只要对齐**入口**（引线规则第 6 条：方向定了就取最短）。
     // 把框中心也当成对齐目标，会让「框心」白占一个候选名额：真机「讨论」（2026-10-30）上边

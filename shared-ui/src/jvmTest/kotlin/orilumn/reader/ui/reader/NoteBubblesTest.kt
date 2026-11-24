@@ -806,6 +806,102 @@ class NoteBubblesTest {
     }
 
     @Test
+    fun `line end above note keeps the leader outside the selected text`() {
+        // 真机「内 {}」（2026-11-24 用户定口）：选区在行末、框在上方。引线方向没错，但竖段
+        // 必须落在「}」右侧的页边空白里；旧画法从框底直着下去，竖段夹在「内」与「{}」之间，
+        // 看着就是画进正文里。这里按逐字墨迹复现：目标字不止一个时，端字要取选区最右那个。
+        val glyphs = listOf(
+            rect(400f, 200f, 440f, 240f),
+            rect(444f, 200f, 476f, 240f),
+            rect(476f, 200f, 508f, 240f),
+        )
+        val row = rect(400f, 200f, 508f, 240f)
+        val line = rect(0f, 200f, 600f, 240f)
+        val leg = noteMarginLegPx(noteLine)
+        val box = rect(420f, 156f, row.right + leg, 198f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = listOf(row),
+            glyphs = glyphs,
+            lineH = noteLine,
+            side = NoteSide.ABOVE,
+            lineBoxes = listOf(line),
+            targetInk = glyphs,
+            marginSide = 1,
+        )
+        assertTrue("贴行末的正上应画 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("L 是两段三个点，实际=$pts", 3, pts.size)
+        assertTrue(
+            "竖段要落在「}」右侧的页边空白里，不能画进正文，实际=$pts（选区右缘 ${row.right}）",
+            pts[0].x > row.right + 1f && pts[0].x == pts[1].x,
+        )
+        assertEquals("末段横着扎进末字的右侧面", row.right, pts[2].x, 0.5f)
+        assertEquals("末段水平", pts[1].y, pts[2].y, 0.5f)
+    }
+
+    @Test
+    fun `top left note leaves its box on the right side`() {
+        // 真机「使用 val」（2026-11-24 用户定口）：框摆在左上角，近端那一头（选区行首）
+        // 缩在框背后。旧画法从框的**左边**横出去、再竖下来，读者看到的是「引线从最左边拉过来」。
+        // 出边按 §6.1 定：左下 / 左上从框的右边横出去。
+        val glyphs = listOf(
+            rect(300f, 200f, 340f, 240f),
+            rect(340f, 200f, 380f, 240f),
+            rect(380f, 200f, 420f, 240f),
+            rect(420f, 200f, 460f, 240f),
+            rect(460f, 200f, 500f, 240f),
+        )
+        val row = rect(300f, 200f, 500f, 240f)
+        val line = rect(0f, 200f, 600f, 240f)
+        val box = rect(330f, 156f, 430f, 198f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = listOf(row),
+            glyphs = glyphs,
+            lineH = noteLine,
+            side = NoteSide.ABOVE_LEFT,
+            lineBoxes = listOf(line),
+            targetInk = glyphs,
+            cornerInk = listOf(row),
+        )
+        assertTrue("左上角的框仍要画 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("首段从框的右边横出去，实际=$pts", box.right, pts[0].x, 0.5f)
+        assertTrue("整条引线都该在框的右边，不许从背面绕，实际=$pts", pts.all { it.x >= box.right - 0.5f })
+        assertEquals("末段竖着进字", pts[1].x, pts[2].x, 0.5f)
+    }
+
+    @Test
+    fun `top right note leaves its box on the left side`() {
+        // 与上一条对称：右上 / 右下从框的**左边**横出去（§6.1），近端缩在框背后时不改从右边绕。
+        val glyphs = listOf(
+            rect(300f, 200f, 340f, 240f),
+            rect(340f, 200f, 380f, 240f),
+            rect(380f, 200f, 420f, 240f),
+            rect(420f, 200f, 460f, 240f),
+        )
+        val row = rect(300f, 200f, 460f, 240f)
+        val line = rect(0f, 200f, 600f, 240f)
+        val box = rect(370f, 156f, 470f, 198f)
+        val arrow = routeNoteArrow(
+            bubble = box,
+            inkRects = listOf(row),
+            glyphs = glyphs,
+            lineH = noteLine,
+            side = NoteSide.ABOVE_RIGHT,
+            lineBoxes = listOf(line),
+            targetInk = glyphs,
+            cornerInk = listOf(row),
+        )
+        assertTrue("右上角的框仍要画 L，实际=$arrow", arrow is NoteArrow.Elbow)
+        val pts = arrowPoints(arrow!!)
+        assertEquals("首段从框的左边横出去，实际=$pts", box.left, pts[0].x, 0.5f)
+        assertTrue("整条引线都该在框的左边，不许从背面绕，实际=$pts", pts.all { it.x <= box.left + 0.5f })
+        assertEquals("末段竖着进字", pts[1].x, pts[2].x, 0.5f)
+    }
+
+    @Test
     fun `sentence punctuation trims the right padding`() {
         // 同为 3 个全角字宽：句末标点那一版右内缩收到 2px，框应窄出 padX - 2px。
         val plain = noteBoxFit("四字字", noteMetrics, 1000f, 1000f, EstimatedNoteTextSizer)

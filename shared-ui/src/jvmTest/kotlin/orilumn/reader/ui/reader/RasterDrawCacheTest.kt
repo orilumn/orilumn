@@ -6,7 +6,6 @@ import androidx.compose.ui.graphics.Canvas
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import org.junit.Assert.assertEquals
@@ -80,9 +79,6 @@ class RasterDrawCacheTest {
         val style = PageOverlayStyle(
             fgArgb = 0xFF202020.toInt(),
             pageBgArgb = 0xFFFFFFFF.toInt(),
-            baseStyle = TextStyle.Default,
-            fontFamily = null,
-            fontWeight = null,
             showBorder = true,
             showBackground = true,
             textSameColor = false,

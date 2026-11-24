@@ -29,8 +29,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
-import androidx.compose.ui.platform.LocalDensity
 import java.awt.Dimension
+import java.awt.event.ComponentAdapter
+import java.awt.event.ComponentEvent
 import java.io.File
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.WindowDecoration
@@ -38,8 +39,13 @@ import androidx.compose.ui.window.WindowPlacement
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.WindowPosition
+import java.awt.GraphicsEnvironment
+import java.awt.Rectangle
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -52,6 +58,11 @@ private const val PREF_WIN_W = "window_width_dp"
 private const val PREF_WIN_H = "window_height_dp"
 private const val PREF_WIN_X = "window_x_dp"
 private const val PREF_WIN_Y = "window_y_dp"
+
+/** 窗口放置态存档：只分「最大化 / 浮动」两档（全屏是一次性阅读动作，不跨启动恢复）。 */
+private const val PREF_WIN_PLACEMENT = "window_placement"
+private const val PLACEMENT_MAXIMIZED = "maximized"
+private const val PLACEMENT_FLOATING = "floating"
 
 /**
  * 设置提交序号（平台层·桌面壳）：`Mutex` 只保证互斥，不保证「先提交的先拿锁」——
@@ -85,18 +96,115 @@ private const val MinContentW = 240
 private const val MinContentH = 300
 
 /**
- * 存档坐标是否落在任一当前屏幕内（dp 按该屏缩放换算 px，200px 容差允许半出屏；
- * 取不到屏幕信息即放行）。显示器增减后越界坐标回默认位，不把窗口开到屏外。
+ * 所有屏幕的包围盒（窗口系统坐标，单位与 AWT 组件一致；取不到屏幕信息时返回空表）。
+ *
+ * **不要再乘缩放系数**：`WindowState` 的「dp」数值与 AWT 窗口坐标是同一套（窗口点），
+ * 而 AWT 的 `GraphicsConfiguration.bounds` 也是同一套坐标。`LocalDensity`（Retina 上 = 2）
+ * 只用于内容渲染，拿 `roundToPx()` 去算窗口尺寸 / `minimumSize` 会翻倍。
  */
-private fun onAnyScreen(xDp: Int, yDp: Int): Boolean = runCatching {
-    java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().screenDevices.any { dev ->
-        val b = dev.defaultConfiguration.bounds
-        val s = dev.defaultConfiguration.defaultTransform.scaleX.coerceAtLeast(1.0)
-        val x = (xDp * s).toInt()
-        val y = (yDp * s).toInt()
-        x in b.x - 200..b.x + b.width && y in b.y - 200..b.y + b.height
+private fun screenBounds(): List<Rectangle> = runCatching {
+    GraphicsEnvironment.getLocalGraphicsEnvironment()
+        .screenDevices.map { it.defaultConfiguration.bounds }
+}.getOrDefault(emptyList())
+
+/**
+ * 存档的窗口矩形是否还落在任一屏幕里（至少露出 80×40 一块，约等于一小截标题栏）。
+ *
+ * 判据是**整窗矩形与屏幕求交**，不是只看左上角：只看角点会放过「角在屏内、整窗在屏外」的存档。
+ * 显示器增减 / 换分辨率后越界的存档回默认位（居中），不把窗口还原到看不见的地方。
+ */
+private fun visibleOnAnyScreen(x: Int, y: Int, w: Int, h: Int): Boolean = runCatching {
+    val screens = screenBounds()
+    if (screens.isEmpty()) return@runCatching true
+    val rect = Rectangle(x, y, w.coerceAtLeast(1), h.coerceAtLeast(1))
+    screens.any { screen ->
+        val hit = screen.intersection(rect)
+        hit.width >= 80 && hit.height >= 40
     }
 }.getOrDefault(true)
+
+/**
+ * 可恢复窗口尺寸的上限：当前所有屏幕拼成的虚拟桌面。
+ *
+ * 旧口径写死 2560×1600，在 4K / 5K 屏上会把窗口越开越小（每次启动都缩一截、版心变了再整章重排）。
+ * 取「当前」屏幕是安全的：换了小屏后超大存档仍会被钳到新屏范围内。
+ */
+private fun maxWindowSize(): Pair<Int, Int> = runCatching {
+    val screens = screenBounds()
+    if (screens.isEmpty()) return@runCatching 8192 to 8192
+    val union = screens.reduce { a, b -> a.union(b) }
+    union.width to union.height
+}.getOrDefault(8192 to 8192)
+
+/**
+ * 上次运行的窗口几何与放置态（平台层·桌面壳）。
+ *
+ * 尺寸/位置存的就是**窗口点**：`WindowState` 的 dp 数值被 CMP 直接当窗口坐标
+ * `setSize` / `setLocation`（不乘屏幕缩放），所以原样读写即可逐像素复原。这一点很要紧 ——
+ * 分页缓存键带版心宽高（像素），窗口差 1 像素就是另一套键，命中不了磁盘表就得整章重排。
+ */
+internal data class RestoredWindowGeometry(
+    val widthPx: Int,
+    val heightPx: Int,
+    val position: WindowPosition,
+    val placement: WindowPlacement,
+)
+
+/** 读回上次的窗口几何与放置态（越界 / 脏值一律回默认）。 */
+internal fun restoreWindowGeometry(store: DesktopShelfStore): RestoredWindowGeometry {
+    val (screenMaxW, screenMaxH) = maxWindowSize()
+    // 默认/钳制下限同「最小窗口」口径（下方 `minimumSize` 一处定，两处引用同一常量）：
+    // 550×400 是桌面阅读的舒服尺寸（小屏/高分屏上不至于占满），240×300 是能读的版心下限
+    // （版心 = 内容尺寸 − 上100/下60/左右50dp 的页边距；再小就一行字都放不下）。
+    fun savedPx(key: String, default: Int, min: Int, max: Int): Int =
+        (store.loadPref(key, default.toString()).toIntOrNull() ?: default)
+            .coerceIn(min, max.coerceAtLeast(min))
+    val width = savedPx(PREF_WIN_W, 550, MinContentW, screenMaxW)
+    val height = savedPx(PREF_WIN_H, 400, MinContentH, screenMaxH)
+    val x = store.loadPref(PREF_WIN_X, "").toIntOrNull()
+    val y = store.loadPref(PREF_WIN_Y, "").toIntOrNull()
+    val position = if (x != null && y != null && visibleOnAnyScreen(x, y, width, height)) {
+        WindowPosition.Absolute(x.dp, y.dp)
+    } else {
+        WindowPosition.PlatformDefault
+    }
+    val placement =
+        if (store.loadPref(PREF_WIN_PLACEMENT, "") == PLACEMENT_MAXIMIZED) {
+            WindowPlacement.Maximized
+        } else {
+            WindowPlacement.Floating
+        }
+    return RestoredWindowGeometry(width, height, position, placement)
+}
+
+/**
+ * 把窗口几何与放置态落盘（平台层·桌面壳）。
+ *
+ * - 全屏期间什么都不记：那时尺寸是整屏，不是读者调出来的窗口；
+ * - 最大化期间**只记「最大化」这一档**，不记尺寸/位置（那是工作区，会把浮动几何冲掉）；
+ * - 浮动时记精确像素：下次启动的版心与上次逐像素一致，才能命中磁盘分页表，不整章重排。
+ */
+internal fun persistWindowGeometry(
+    store: DesktopShelfStore,
+    fullscreen: Boolean,
+    placement: WindowPlacement,
+    size: DpSize,
+    position: WindowPosition,
+) {
+    if (fullscreen || placement == WindowPlacement.Fullscreen) return
+    if (placement == WindowPlacement.Floating) {
+        store.savePref(PREF_WIN_W, size.width.value.toInt().toString())
+        store.savePref(PREF_WIN_H, size.height.value.toInt().toString())
+        (position as? WindowPosition.Absolute)?.let {
+            store.savePref(PREF_WIN_X, it.x.value.toInt().toString())
+            store.savePref(PREF_WIN_Y, it.y.value.toInt().toString())
+        }
+    }
+    store.savePref(
+        PREF_WIN_PLACEMENT,
+        if (placement == WindowPlacement.Maximized) PLACEMENT_MAXIMIZED else PLACEMENT_FLOATING,
+    )
+}
 
 /**
  * 「启动时继续阅读」要打开的那一本（平台层·桌面壳）：读过、且文件还在的书里，
@@ -137,52 +245,73 @@ fun main(args: Array<String>) {
             "Orilumn.Desktop",
             "jvm vendor=${System.getProperty("java.vendor")} version=${System.getProperty("java.runtime.version")}",
         )
-        // 三端同一 JVM 壳：窗口尺寸+位置经 prefs 持久化，下次启动原地恢复
-        // （Win/macOS/Linux 同口径；显示器变更致越界时回居中，不开到屏外）。
+        // 三端同一 JVM 壳：窗口尺寸 + 位置 + 放置态（浮动/最大化）经 prefs 持久化，
+        // 下次启动原地恢复（Win/macOS/Linux 同口径；显示器变更致越界时回居中，不开到屏外）。
+        //
+        // 为什么连放置态也要记：最大化用户占多数。只记浮动几何的话，每次启动都得先按浮动尺寸
+        // 排一遍、再拉满重排一遍 —— 记住最大化，启动即按工作区尺寸一次排好、命中磁盘表。
         val store = remember { DesktopShelfStore(DesktopPaths.root) }
         // 窗口装饰一律用系统默认的（标题栏、圆角、阴影、缩放热区、光标、贴边全归窗口管理器 /
         // AppKit）。自绘窗口壳（无边框 + 自绘标题栏 + 透明圆角投影）已撤：那条路要把缩放热区、
         // 缩放光标、拖动、全屏、透明底子一样样自己补，每一样都要跟平台惯例对齐，代价远大于收益。
         // prefs 存的就是窗口尺寸与左上角。
-        fun contentDp(key: String, def: Int, lo: Int, hi: Int): Float =
-            (store.loadPref(key, def.toString()).toIntOrNull() ?: def).coerceIn(lo, hi).toFloat()
-        // 默认/钳制下限同「最小窗口」口径（下方 `minimumSize` 一处定，两处引用同一常量）：
-        // 550×400 是桌面阅读的舒服尺寸（小屏/高分屏上不至于占满），240×300 是能读的版心下限
-        // （版心 = 内容尺寸 − 上100/下60/左右50dp 的页边距；再小就一行字都放不下）。
+        val restoredGeometry = remember { restoreWindowGeometry(store) }
+        // TEMP-DBG（窗口尺寸排查，用完删除）
+        orilumn.reader.io.Logger.d(
+            "Orilumn.WIN",
+            "restore w=${restoredGeometry.widthPx} h=${restoredGeometry.heightPx}" +
+                " pos=${restoredGeometry.position} placement=${restoredGeometry.placement}",
+        )
         val windowState = rememberWindowState(
-            width = contentDp(PREF_WIN_W, 550, MinContentW, 2560).dp,
-            height = contentDp(PREF_WIN_H, 400, MinContentH, 1600).dp,
-            position = remember {
-                val x = store.loadPref(PREF_WIN_X, "").toIntOrNull()
-                val y = store.loadPref(PREF_WIN_Y, "").toIntOrNull()
-                if (x != null && y != null && onAnyScreen(x, y)) {
-                    androidx.compose.ui.window.WindowPosition.Absolute(x.dp, y.dp)
-                } else {
-                    androidx.compose.ui.window.WindowPosition.PlatformDefault
-                }
-            },
+            placement = restoredGeometry.placement,
+            width = restoredGeometry.widthPx.dp,
+            height = restoredGeometry.heightPx.dp,
+            position = restoredGeometry.position,
         )
         // 窗口级状态 + 全屏命令（平台层·桌面壳）：快捷键挂在 Window 参数上、拿不到窗口对象，
         // 故用这个 holder 把内容里的窗口挂上来（见 DesktopWindowChrome 的 KDoc）。
         val chrome = remember { DesktopWindowChrome() }
-        // 移动/调整完 500ms 落盘（IO 线程，不挡 UI；下次启动即原地恢复）。
+        // 恢复是否已经落到真实窗口上（平台层·桌面壳）。
+        // 窗口刚创建时停在最小尺寸（240×300），防抖若抢在恢复生效前跑一次，就会把这个尺寸
+        // 当成读者调的窗口大小存回去 —— 下次启动还是小窗，再也回不到读者原来的尺寸。
+        // 故：浮动窗口要先看到真实尺寸等于存档尺寸才允许落盘；最大化 / 全屏本身不记尺寸，
+        // 直接放行。另设 2 秒兜底，防止系统把存档尺寸钳掉（换小屏）后一直不落盘。
+        val geometryApplied = remember {
+            mutableStateOf(restoredGeometry.placement != WindowPlacement.Floating)
+        }
+        LaunchedEffect(Unit) {
+            delay(2000)
+            // TEMP-DBG（窗口尺寸排查，用完删除）
+            if (!geometryApplied.value) {
+                orilumn.reader.io.Logger.w(
+                    "Orilumn.WIN",
+                    "restore fallback：2s 到仍未匹配，放行落盘",
+                )
+            }
+            geometryApplied.value = true
+        }
+        // 移动/调整/最大/还原后 500ms 落盘（IO 线程，不挡 UI；下次启动即原地恢复）。
         // 全屏期间不落盘：那时 windowState.size 已是整屏尺寸，落盘会把用户原来的窗口大小冲掉。
         LaunchedEffect(windowState, chrome) {
             snapshotFlow {
-                Triple(chrome.fullscreen, windowState.size, windowState.position)
+                listOf<Any>(chrome.fullscreen, windowState.placement, windowState.size, windowState.position)
             }
                 .debounce(500)
-                .collect { (fullscreen, size, pos) ->
-                    // 只记**浮动**几何：全屏时 size 已是整屏、最大化时是工作区，都不是用户调出来的
-                    // 窗口大小/位置，落盘会把用户原来的浮动几何冲掉。
-                    if (fullscreen || windowState.placement != WindowPlacement.Floating) return@collect
+                .collect {
+                    // 恢复还没落到真实窗口上（窗口仍在最小尺寸）时先不记：见上方 [geometryApplied]。
+                    if (!geometryApplied.value) return@collect
+                    // 状态在 UI 线程上取快照，再交给 IO 落盘（不要在 IO 线程读 Compose 状态）。
+                    val fullscreen = chrome.fullscreen
+                    val placement = windowState.placement
+                    val size = windowState.size
+                    val pos = windowState.position
+                    // TEMP-DBG（窗口尺寸排查，用完删除）
+                    orilumn.reader.io.Logger.d(
+                        "Orilumn.WIN",
+                        "persist-debounce size=$size pos=$pos placement=$placement fullscreen=$fullscreen",
+                    )
                     withContext(Dispatchers.IO) {
-                        store.savePref(PREF_WIN_W, size.width.value.toInt().toString())
-                        store.savePref(PREF_WIN_H, size.height.value.toInt().toString())
-                        (pos as? androidx.compose.ui.window.WindowPosition.Absolute)?.let {
-                            store.savePref(PREF_WIN_X, it.x.value.toInt().toString())
-                            store.savePref(PREF_WIN_Y, it.y.value.toInt().toString())
-                        }
+                        persistWindowGeometry(store, fullscreen, placement, size, pos)
                     }
                 }
         }
@@ -191,7 +320,23 @@ fun main(args: Array<String>) {
         @Suppress("DEPRECATION")
         val appIcon = painterResource("icon.png")
         Window(
-            onCloseRequest = ::exitApplication,
+            onCloseRequest = {
+                // TEMP-DBG（窗口尺寸排查，用完删除）
+                orilumn.reader.io.Logger.d(
+                    "Orilumn.WIN",
+                    "persist-close size=${windowState.size} pos=${windowState.position}" +
+                        " placement=${windowState.placement} fullscreen=${chrome.fullscreen}",
+                )
+                // 关窗前同步落盘一次：刚拖过窗口、还没等满 500ms 防抖就关掉，几何也不丢。
+                persistWindowGeometry(
+                    store,
+                    chrome.fullscreen,
+                    windowState.placement,
+                    windowState.size,
+                    windowState.position,
+                )
+                exitApplication()
+            },
             state = windowState,
             title = "Orilumn",
             icon = appIcon,
@@ -213,16 +358,60 @@ fun main(args: Array<String>) {
             SideEffect { chrome.attach(window, windowState) }
             // 最小窗口尺寸兜底：防止拖到比版心下限还小导致 contentH ≤ 0。
             // 取值见 [MinContentW]/[MinContentH]（与上方读存档的钳制下限同源）。
-            val densityMin = LocalDensity.current
             val awtWin = window as? java.awt.Window
             SideEffect {
                 val w = awtWin ?: return@SideEffect
-                with(densityMin) {
-                    val minW = MinContentW.dp.roundToPx()
-                    val minH = MinContentH.dp.roundToPx()
-                    if (w.minimumSize.width != minW || w.minimumSize.height != minH) {
-                        w.minimumSize = Dimension(minW, minH)
-                    }
+                // 不乘 density：`WindowState` 的 dp 数值与 AWT 窗口坐标是同一套（dp 即窗口点），
+                // 屏幕缩放系数只影响内容渲染（Retina 上 LocalDensity = 2）。乘了 roundToPx 会让
+                // 最小窗口在 Retina 上翻倍成 480×600，读者拖小到下限后这个值又被当成「上次的尺寸」
+                // 存回去 —— 此后每次启动都是那个翻倍的小窗口。
+                if (w.minimumSize.width != MinContentW || w.minimumSize.height != MinContentH) {
+                    w.minimumSize = Dimension(MinContentW, MinContentH)
+                }
+            }
+            // TEMP-DBG（窗口尺寸排查，用完删除）：谁在改窗口 —— 每次 AWT 层的缩放/移动都打一条栈。
+            val winTraceTarget = remember { arrayOfNulls<java.awt.Window>(1) }
+            SideEffect {
+                val w = awtWin ?: return@SideEffect
+                if (winTraceTarget[0] === w) return@SideEffect
+                winTraceTarget[0] = w
+                fun frames(): String = Throwable().stackTrace.drop(2).take(16).joinToString(" <- ") {
+                    "${it.className.substringAfterLast('.')}.${it.methodName}:${it.lineNumber}"
+                }
+                w.addComponentListener(
+                    object : ComponentAdapter() {
+                        override fun componentResized(e: ComponentEvent?) {
+                            orilumn.reader.io.Logger.d(
+                                "Orilumn.WIN",
+                                "RESIZE ${w.width}x${w.height}@${w.x},${w.y} stack=${frames()}",
+                            )
+                        }
+
+                        override fun componentMoved(e: ComponentEvent?) {
+                            orilumn.reader.io.Logger.d(
+                                "Orilumn.WIN",
+                                "MOVE ${w.width}x${w.height}@${w.x},${w.y} stack=${frames()}",
+                            )
+                        }
+                    },
+                )
+            }
+            // 恢复已落到真实窗口上：尺寸对上了才允许落盘（见 [geometryApplied]）。
+            // 以 `windowState.size` 为 key，窗口尺寸变化时重新检查。
+            LaunchedEffect(windowState.size, windowState.position) {
+                val w = awtWin ?: return@LaunchedEffect
+                // TEMP-DBG（窗口尺寸排查，用完删除）
+                orilumn.reader.io.Logger.d(
+                    "Orilumn.WIN",
+                    "awt=${w.width}x${w.height} at=${w.x},${w.y}" +
+                        " content=${(w as? javax.swing.JFrame)?.contentPane?.width}x" +
+                        "${(w as? javax.swing.JFrame)?.contentPane?.height}" +
+                        " insets=${w.insets} state=${windowState.size} pos=${windowState.position}" +
+                        " applied=${geometryApplied.value}",
+                )
+                if (geometryApplied.value) return@LaunchedEffect
+                if (w.width == restoredGeometry.widthPx && w.height == restoredGeometry.heightPx) {
+                    geometryApplied.value = true
                 }
             }
             MaterialTheme {

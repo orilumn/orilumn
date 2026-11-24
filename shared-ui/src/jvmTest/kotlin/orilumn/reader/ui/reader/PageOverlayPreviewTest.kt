@@ -8,10 +8,10 @@ import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
 import androidx.compose.ui.text.TextMeasurer
-import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.createFontFamilyResolver
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
+import orilumn.reader.engine.skia.NoteTextSpec
 import org.jetbrains.skia.EncodedImageFormat
 import org.jetbrains.skia.Image
 import org.junit.Test
@@ -32,9 +32,7 @@ class PageOverlayPreviewTest {
         val style = PageOverlayStyle(
             fgArgb = 0xFF202020.toInt(),
             pageBgArgb = 0xFFFFFFFF.toInt(),
-            baseStyle = TextStyle.Default,
-            fontFamily = null,
-            fontWeight = null,
+            noteSpec = NoteTextSpec(emptyList()),
             showBorder = true,
             showBackground = true,
             textSameColor = false,

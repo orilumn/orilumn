@@ -16,13 +16,11 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.TextMeasurer
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.font.FontFamily
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
+import orilumn.reader.engine.skia.NoteTextLayout
+import orilumn.reader.engine.skia.NoteTextSpec
 import orilumn.reader.io.Logger
 import kotlin.math.roundToInt
 
@@ -43,12 +41,11 @@ import kotlin.math.roundToInt
  * 翻页卷曲时两层**各过一遍同一个卷曲着色器**（覆盖层那一遍把纸背/纸卷区返回透明），
  * 于是旁注与页码跟着纸一起弯，而不是浮在上面不动。
  *
- * ## 为什么用 Compose 的 DrawScope 画，而不是 skia
+ * ## 旁注文字走自研引擎，页码仍用 Compose
  *
- * 布点用的是 `rememberTextMeasurer`（Compose 文本栈）量出来的尺子；绘制若换 skia 段落，
- * 折行/省略号就会出现「量的是一个宽度、画的是另一个」的漂移。这里用同一台
- * [TextMeasurer] 画，量与画天然同源；连基础样式（[PageOverlayStyle.baseStyle]）都取自
- * 同一个 `LocalTextStyle`。
+ * 旁注的断行 / 对齐 / 字距 / 混排间距与正文共用自研断行引擎（[NoteTextLayout] 出断行与
+ * 行窗口，[drawNoteTextLines] 落墨），所以读者调字间距时正文与批注一起变，不会「正文在动、
+ * 批注不动」。页码只有一行数字，仍用 [TextMeasurer] 直画。
  *
  * 像素从旧 `NoteBubbles` 覆盖层搬来：比例/颜色/内缩逐项照抄；交互那一侧只剩
  * [NoteBubbleHitAreas]（透明热区）。
@@ -58,10 +55,13 @@ internal data class PageOverlayStyle(
     val fgArgb: Int,
     /** 纸面底色（同色字体按它的明暗决定往哪边调）。 */
     val pageBgArgb: Int,
-    /** 旁注基础样式：`LocalTextStyle`（量字与画字必须同源，见 KDoc）。 */
-    val baseStyle: TextStyle,
-    val fontFamily: FontFamily?,
-    val fontWeight: FontWeight?,
+    /**
+     * 旁注文字的引擎参数（字族 / 字重 / 字距 / 混排间距）。
+     *
+     * **必须**与布点用的 [NoteTextSizer] 是同一个实例：量宽和画字一旦不是同一套字形与字距，
+     * 摆位判「整句放得下」而画出来会多折一行、被省略号截掉。
+     */
+    val noteSpec: NoteTextSpec = NoteTextSpec(emptyList()),
     val showBorder: Boolean,
     val showBackground: Boolean,
     val textSameColor: Boolean,
@@ -82,6 +82,13 @@ internal data class PageOverlayContent(
     val notes: List<NoteBubble>,
     val style: PageOverlayStyle,
     val pageNumber: PageNumberSpec?,
+    /**
+     * 共用字体池代次（[NoteFontPool]）：池换过面，旁注字形就换了。
+     *
+     * 必须进缓存键——布点几何可能恰好一模一样（同样的宽度、同样的行数），
+     * 但画出来的字形已经不是那一张，只按内容比会把旧字形一直留在缓存里。
+     */
+    val fontEpoch: Long = 0L,
 ) {
     val isEmpty: Boolean get() = notes.isEmpty() && pageNumber == null
 }
@@ -165,7 +172,7 @@ internal fun DrawScope.drawPageOverlay(
     content: PageOverlayContent,
     textMeasurer: TextMeasurer,
 ) {
-    drawNoteBubbles(content.notes, content.style, textMeasurer)
+    drawNoteBubbles(content.notes, content.style)
     content.pageNumber?.let { drawPageNumberLabel(it, textMeasurer) }
 }
 
@@ -176,7 +183,6 @@ internal fun DrawScope.drawPageOverlay(
 internal fun DrawScope.drawNoteBubbles(
     bubbles: List<NoteBubble>,
     style: PageOverlayStyle,
-    textMeasurer: TextMeasurer,
 ) {
     if (bubbles.isEmpty()) return
     // 1) 引线先画（框压在线上，与旧覆盖层同序）。
@@ -190,22 +196,21 @@ internal fun DrawScope.drawNoteBubbles(
             continue
         }
         val padLeft = b.fontPx * NOTE_BUBBLE_PAD_RATIO
-        val lineH = b.fontPx * NOTE_BUBBLE_LINE_RATIO
-        val layout = textMeasurer.measure(
+        // 行宽与布点量宽同一个口径：框宽减两侧内缩，**取整像素**（见 `EngineNoteTextSizer`）。
+        val textWidthPx = (b.widthPx - padLeft - b.padRightPx).roundToInt().coerceAtLeast(1)
+        // 断行 / 对齐 / 字距 / 混排间距全部由自研引擎出（与布点同一个断行器）。
+        val draw = NoteTextLayout.drawLines(
+            spec = style.noteSpec,
             text = b.text,
-            style = noteTextStyle(b, style, lineH),
-            overflow = TextOverflow.Ellipsis,
-            softWrap = true,
+            fontPx = b.fontPx,
+            lineHeightRatio = NOTE_BUBBLE_LINE_RATIO,
+            widthPx = textWidthPx,
             maxLines = b.maxLines,
-            // 左右内缩与落位时的「整句宽度」估算同源（[NOTE_BUBBLE_PAD_RATIO]）：
-            // 估宽留的余量就是这里真占的内缩，否则会多折一行、被省略号截掉。
-            constraints = Constraints(
-                maxWidth = (b.widthPx - padLeft - b.padRightPx).roundToInt().coerceAtLeast(1),
-            ),
+            inkArgb = noteInkArgb(b, style),
         )
         // 框高 = 文字实测高（旧覆盖层不设高度上限，框跟着文字长），
         // 这样「行高向上取整」带来的那一两个像素也不会把框画短。
-        val boxH = layout.size.height.toFloat()
+        val boxH = draw.heightPx.toFloat()
         val tint = Color(b.argb)
         if (style.showBackground) {
             drawRoundRect(
@@ -230,36 +235,28 @@ internal fun DrawScope.drawNoteBubbles(
                 style = Stroke(width = strokeW),
             )
         }
-        drawText(layout, topLeft = Offset(b.leftPx + padLeft, b.topPx))
+        drawNoteTextLines(
+            lines = draw.lines,
+            leftPx = b.leftPx + padLeft,
+            topPx = b.topPx,
+            widthPx = textWidthPx,
+            heightPx = draw.heightPx,
+        )
     }
 }
 
 /**
- * 旁注文字样式：基础样式（`LocalTextStyle`）+ 字族/字重 + 字号/行高/颜色。
- *
- * 颜色默认跟随正文墨色；「使用标注同色字体」时按标注色调成同色相，
+ * 旁注文字墨色：默认跟随正文墨色；「使用标注同色字体」时按标注色调成同色相，
  * 且对比度按**实际压在什么底上**算（开了底色就是纸面 + 16% 标注色）。
  */
-private fun DrawScope.noteTextStyle(b: NoteBubble, style: PageOverlayStyle, lineH: Float): TextStyle {
-    val color = if (style.textSameColor) {
-        val backdrop = if (style.showBackground) {
-            blendOver(style.pageBgArgb, b.argb or 0xFF000000.toInt(), NOTE_BUBBLE_BG_ALPHA)
-        } else {
-            style.pageBgArgb
-        }
-        Color(noteInkColor(b.argb, backdrop))
+private fun noteInkArgb(b: NoteBubble, style: PageOverlayStyle): Int {
+    if (!style.textSameColor) return style.fgArgb
+    val backdrop = if (style.showBackground) {
+        blendOver(style.pageBgArgb, b.argb or 0xFF000000.toInt(), NOTE_BUBBLE_BG_ALPHA)
     } else {
-        Color(style.fgArgb)
+        style.pageBgArgb
     }
-    return style.baseStyle.merge(
-        TextStyle(
-            color = color,
-            fontFamily = style.fontFamily,
-            fontWeight = style.fontWeight,
-            fontSize = b.fontPx.toSp(),
-            lineHeight = lineH.toSp(),
-        ),
-    )
+    return noteInkColor(b.argb, backdrop)
 }
 
 /** 小椭圆（§1.6）：贴着划线右端的固定大小记号，实底色 + 三点。 */

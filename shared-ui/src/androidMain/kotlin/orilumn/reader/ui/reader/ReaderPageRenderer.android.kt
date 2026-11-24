@@ -261,18 +261,24 @@ private class AndroidReaderPageRenderer(
 /**
  * skia 离屏产物 → `android.graphics.Bitmap`（内部版：已知尺寸，省一次查询；
  * [skiaImageToImageBitmap] 是对外接缝走同一条路）。
+ *
+ * @param alphaType 目标字节的透明度语义：整页栅格是不透明底（[ColorAlphaType.OPAQUE]），
+ *   覆盖层里的旁注文字是**透明底**（[ColorAlphaType.PREMUL]）——按 OPAQUE 读会把透明区
+ *   的预乘颜色当成实色，边缘发黑。位图显式标成预乘，交给 Android 按预乘混合。
  */
-private fun skiaImageToAndroidBitmap(
+internal fun skiaImageToAndroidBitmap(
     image: org.jetbrains.skia.Image,
     w: Int,
     h: Int,
+    alphaType: ColorAlphaType = ColorAlphaType.OPAQUE,
 ): android.graphics.Bitmap? = runCatching {
     val tmp = org.jetbrains.skia.Bitmap()
     tmp.allocN32Pixels(w, h, true)
     if (!image.readPixels(tmp)) return@runCatching null
-    val info = ImageInfo(w, h, ColorType.RGBA_8888, ColorAlphaType.OPAQUE)
+    val info = ImageInfo(w, h, ColorType.RGBA_8888, alphaType)
     val bytes = tmp.readPixels(info, w * 4, 0, 0) ?: return@runCatching null
     android.graphics.Bitmap.createBitmap(w, h, android.graphics.Bitmap.Config.ARGB_8888).apply {
         copyPixelsFromBuffer(java.nio.ByteBuffer.wrap(bytes))
+        if (alphaType != ColorAlphaType.OPAQUE) isPremultiplied = true
     }
 }.getOrNull()

@@ -124,6 +124,15 @@ class DesktopReaderHost(
     /** 装池签名（`FontPoolSync` 两段式：命中即翻页零 IO；有加载失败的不记名，下次重试）。 */
     private var lastPoolFaceSig: String? = null
 
+    /**
+     * 旁注字体要装进共用池的「族名 → 字重」（`noteFontPoolExtra`）。
+     *
+     * 旁注只作用于覆盖层、不进版式，但字形从共用池取：随 profile 一起更新，
+     * 每次装池都带上，换批注字体后池里才有那个族。
+     */
+    private var noteFontExtra: Map<String, Int> =
+        orilumn.reader.data.font.noteFontPoolExtra(settings.noteFont, settings.noteFontWeight)
+
     /** 目录（面板用；open() 后就绪）。 */
     val toc: List<TocItem> get() = controller.toc()
 
@@ -820,6 +829,18 @@ class DesktopReaderHost(
     private suspend fun applyProfile(next: ReaderSettings) {
         profile = TypographicProfile.build(next, density)
         controller.profile = profile
+        noteFontExtra = orilumn.reader.data.font.noteFontPoolExtra(next.noteFont, next.noteFontWeight)
+        topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
+    }
+
+    /**
+     * 只换旁注字体（纯 UI 项，不重排）：更新装池需求后追装字库池。
+     *
+     * 旁注字形从共用池取，池不跟进就画成回退字体；池真变时 `topUpSkiaFonts` 会推
+     * `NoteFontPool` 代次，覆盖层与量宽尺子据此重画 / 重建。
+     */
+    suspend fun syncNoteFontPool(next: ReaderSettings) {
+        noteFontExtra = orilumn.reader.data.font.noteFontPoolExtra(next.noteFont, next.noteFontWeight)
         topUpSkiaFonts(orilumn.reader.engine.css.FontDemand.EMPTY)
     }
 
@@ -869,11 +890,15 @@ class DesktopReaderHost(
                 },
                 fileSize = { p -> java.io.File(p).takeIf { it.isFile }?.length() },
                 fontBytes = { id -> fontLibrary.fontBytes(id) },
+                // 旁注字体只作用于覆盖层（不进级联），但字形同样从共用池取：不进池就是回退字体。
+                extraFamilies = noteFontExtra,
                 logTag = "Orilumn.Desktop",
             )
             lastPoolFaceSig = sig
             // 池环境签名回填引擎：页面快照的键要比它（字体文件被删/换后旧快照不认）。
             controller.fontPoolSignature = sig
+            // 池换过面 → 通知覆盖层：旁注字形与量宽度量都变了（见 `NoteFontPool`）。
+            if (changed) orilumn.reader.ui.reader.NoteFontPool.bump()
             changed
         }
 

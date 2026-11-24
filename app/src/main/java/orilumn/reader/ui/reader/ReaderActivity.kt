@@ -434,7 +434,6 @@ class ReaderActivity : ComponentActivity() {
                     contentRevision = layoutRevision,
                     annotationsEpoch = annotationsEpoch,
                     bookmarksEpoch = bookmarksEpoch,
-                    fontEntries = fontEntries,
                 )
             } else {
                 // 加载背页（打开的背色与正文一致）。
@@ -899,13 +898,45 @@ class ReaderActivity : ComponentActivity() {
 
     // ---- Settings commit / preview ----
 
-    /** 统一入口：liveApply 后，排版变化走节流重排，否则重应用物理背光；随后持久化。 */
+    /**
+     * 统一入口：liveApply 后，排版变化走节流重排，否则重应用物理背光；随后持久化。
+     *
+     * 旁注字体是**例外的一条**：它不进版式（`withoutNonLayout`），所以走「无重排」，
+     * 但字形仍从共用池取 —— 先装池再应用，覆盖层首画就是新字形（见下面的分支）。
+     */
     private fun commitSettings(next: ReaderSettings, typographyChanged: Boolean) {
+        val prev = effective
+        if (!typographyChanged && (next.noteFont != prev.noteFont || next.noteFontWeight != prev.noteFontWeight)) {
+            commitNoteFont(next)
+            return
+        }
         liveApply(next)
         // 排版提交先刷新字库池再重排：换选已导入字体只改槽，不断行也可能同分页，
         // 池不跟进则新族名无处解析、画出来只能回退（切字体无效的根因）。
         if (typographyChanged) refreshFontsThenRelayout() else applyPhysicalBrightness(next)
         persistSettings(next)
+    }
+
+    /**
+     * 旁注字体提交：**先装池、再应用**。
+     *
+     * 顺序不能反：覆盖层按内容键缓存整页图，先应用就会先按旧池画一版回退字形，
+     * 池随后装好时那张图已经在缓存里了（只有池代次变化才会重画，见 `NoteFontPool`）。
+     * 装池是读字体文件 + 装配集合，几十毫秒量级；连点换字体时后一次取消前一次，
+     * 落地的永远是读者最后选的那一个。
+     */
+    private var noteFontCommitJob: Job? = null
+
+    private fun commitNoteFont(next: ReaderSettings) {
+        // 面板立刻显示新选择（字库页的「当前字体」标签跟着动），页面等池装好再换字形。
+        panelSettings = next
+        noteFontCommitJob?.cancel()
+        noteFontCommitJob = lifecycleScope.launch {
+            syncSkiaPool(orilumn.reader.engine.css.FontDemand.EMPTY, noteSettings = next)
+            liveApply(next)
+            applyPhysicalBrightness(next)
+            persistSettings(next)
+        }
     }
 
     /** 拖拽实时应用（不落盘）：更新 effective/profile 与引擎持有 profile。排版由调用方节流重排。 */
@@ -1190,29 +1221,45 @@ class ReaderActivity : ComponentActivity() {
     /**
      * F4c: 装池经共享 [FontPoolSync]（两段式，语义沿旧实现：孤儿自愈→选择→签名比对→装配；
      * 系统衬线（[SystemCjkSerif]）经 `systemSerif` 参数并入）。
+     *
+     * @param noteSettings 旁注字体取哪份设置：默认当前生效设置；换批注字体时传**目标**设置
+     *   （壳先装池再应用，覆盖层首画即新字形）。
      */
-    private suspend fun syncSkiaPool(extra: orilumn.reader.engine.css.FontDemand): Boolean = withContext(Dispatchers.IO) {
-        // 系统宋体补装：把设备自带的中文衬线（NotoSerifCJK.ttc 的 SC 面）以引擎保留别名装进共用池，
-        // 让传统模式/书内 `serif` 的中文落到宋体而非默认黑体（见 SystemCjkSerif）。进程内只读一次。
-        val (changed, sig) = orilumn.reader.engine.skia.FontPoolSync.syncPool(
-            profile = profile,
-            demand = extra,
-            bookEntries = bookFontEntries,
-            lastSig = lastPoolFaceSig,
-            loadFaces = {
-                // 孤儿文件先自愈（有字节无记录：选它永远落空），再按需装载。
-                runCatching { fontRepository.reconcileOrphanFiles() }.getOrNull()
-                    ?: runCatching { fontRepository.list() }.getOrNull()
-            },
-            fileSize = { p -> java.io.File(p).takeIf { it.isFile }?.length() },
-            fontBytes = { id -> fontRepository.fontBytes(id) },
-            systemSerif = SystemCjkSerif.entry(),
-            logTag = TAG,
-        )
-        lastPoolFaceSig = sig
-        // 池环境签名回填引擎：页面快照的键要比它（字体文件被删/换后旧快照不认）。
-        engine?.fontPoolSignature = sig
-        changed
+    private suspend fun syncSkiaPool(
+        extra: orilumn.reader.engine.css.FontDemand,
+        noteSettings: ReaderSettings = effective,
+    ): Boolean {
+        val changed = withContext(Dispatchers.IO) {
+            // 系统宋体补装：把设备自带的中文衬线（NotoSerifCJK.ttc 的 SC 面）以引擎保留别名装进共用池，
+            // 让传统模式/书内 `serif` 的中文落到宋体而非默认黑体（见 SystemCjkSerif）。进程内只读一次。
+            val (changed, sig) = orilumn.reader.engine.skia.FontPoolSync.syncPool(
+                profile = profile,
+                demand = extra,
+                bookEntries = bookFontEntries,
+                lastSig = lastPoolFaceSig,
+                loadFaces = {
+                    // 孤儿文件先自愈（有字节无记录：选它永远落空），再按需装载。
+                    runCatching { fontRepository.reconcileOrphanFiles() }.getOrNull()
+                        ?: runCatching { fontRepository.list() }.getOrNull()
+                },
+                fileSize = { p -> java.io.File(p).takeIf { it.isFile }?.length() },
+                fontBytes = { id -> fontRepository.fontBytes(id) },
+                systemSerif = SystemCjkSerif.entry(),
+                // 旁注字体只作用于覆盖层（不进级联），但字形同样从共用池取：不进池就是回退字体。
+                extraFamilies = orilumn.reader.data.font.noteFontPoolExtra(
+                    noteSettings.noteFont,
+                    noteSettings.noteFontWeight,
+                ),
+                logTag = TAG,
+            )
+            lastPoolFaceSig = sig
+            // 池环境签名回填引擎：页面快照的键要比它（字体文件被删/换后旧快照不认）。
+            engine?.fontPoolSignature = sig
+            changed
+        }
+        // 池换过面 → 通知覆盖层：旁注字形与量宽度量都变了（见 `NoteFontPool`）。
+        if (changed) NoteFontPool.bump()
+        return changed
     }
 
     /**

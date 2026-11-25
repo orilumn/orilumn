@@ -67,8 +67,9 @@ PKG=$(ls "$BUILD"/*.pkg.tar.zst 2>/dev/null | head -1)
 mkdir -p "$(dirname "$OUT")"
 cp "$PKG" "$OUT"
 
-# 干净容器里真装一次。--nodeps：验证的是包本身的结构与落点，依赖解析留给真机
-# （容器里没有 X11/GTK 那一套，装依赖既慢又没必要）。
+# 干净容器里真装一次。用 -dd（跳过**全部**依赖检查，`--nodeps` 只跳过版本检查）：
+# 这里验证的是包本身的结构与落点，依赖解析留给真机 —— 容器里没有 X11/GTK 那一套，
+# 也没有同步数据库，装依赖既慢又没必要。
 docker run --rm \
     -e ORILUMN_VERSION="$VERSION" \
     -e PKG_NAME="$(basename "$OUT")" \
@@ -76,7 +77,7 @@ docker run --rm \
     --entrypoint bash \
     archlinux:base -lc '
         set -eu
-        pacman -U --noconfirm --nodeps "/pkg/$PKG_NAME" >/dev/null
+        pacman -U --noconfirm -dd "/pkg/$PKG_NAME" >/dev/null
         test -f /usr/share/applications/orilumn.desktop
         test -x /opt/orilumn/bin/Orilumn
         test -e /usr/bin/orilumn

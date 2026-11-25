@@ -31,7 +31,8 @@ ICON="$HERE/src/main/resources/icon.png"
 [ -f "$ICON" ] || { echo "图标不存在：$ICON" >&2; exit 1; }
 
 WORK=$(mktemp -d)
-trap 'rm -rf "$WORK"' EXIT
+# 清理失败不许把整步判红：真正的校验在下面，临时目录残留顶多占点磁盘。
+trap 'rm -rf "$WORK" || true' EXIT
 BUILD="$WORK/build"
 mkdir -p "$BUILD"
 cp "$HERE/arch/PKGBUILD" "$HERE/arch/orilumn.install" "$BUILD/"
@@ -42,6 +43,8 @@ docker run --rm \
     -e ORILUMN_VERSION="$VERSION" \
     -e APP_IMAGE_DIR=/appimage \
     -e ICON_PNG=/icon.png \
+    -e HOST_UID="$(id -u)" \
+    -e HOST_GID="$(id -g)" \
     -v "$BUILD:/build" \
     -v "$APP_DIR:/appimage:ro" \
     -v "$ICON:/icon.png:ro" \
@@ -59,6 +62,9 @@ docker run --rm \
             APP_IMAGE_DIR="$APP_IMAGE_DIR" \
             ICON_PNG="$ICON_PNG" \
             makepkg -f --nodeps --noconfirm
+        # 产物交回宿主用户：builder（uid 1000）建的目录宿主没写权限，宿主删不掉里面
+        # 的文件，临时目录的清理会失败。
+        chown -R "$HOST_UID:$HOST_GID" /build
     '
 
 PKG=$(ls "$BUILD"/*.pkg.tar.zst 2>/dev/null | head -1)

@@ -1,0 +1,58 @@
+# Arch / EndeavourOS 用的 pacman 包配方。
+#
+# jpackage 没有 pacman 目标，这个包由 CI 在 archlinux 容器里用 makepkg 现造
+# （见 desktopApp/make-arch-package.sh）。三个输入都走环境变量，配方里不写死任何东西：
+#   ORILUMN_VERSION  版本号——唯一来源是 gradle.properties 的 orilumn.versionName
+#   APP_IMAGE_DIR    :desktopApp:createDistributable 产出的便携目录（自带 jlink 运行时）
+#   ICON_PNG         打包图标（desktopApp/src/main/resources/icon.png）
+pkgname=orilumn
+pkgver=${ORILUMN_VERSION:?必须设置 ORILUMN_VERSION（版本唯一来源是 gradle.properties）}
+pkgrel=1
+pkgdesc='跨平台 EPUB 阅读器，自研排版与翻页引擎'
+arch=('x86_64')
+url='https://github.com/orilumn/orilumn'
+license=('MIT')
+# 依赖按 jpackage 打 deb 时写进 control 的那串运行库折算成 Arch 的包名：
+# gtk3 是 AWT/Compose 窗口的后端（也带进 X11/GL 一整套），fontconfig/freetype2 是字体栈，
+# libglvnd 提供 libGL，alsa-lib 是 AWT 的音频依赖。
+depends=('gtk3' 'fontconfig' 'freetype2' 'libglvnd' 'alsa-lib')
+install=orilumn.install
+# 运行时是 jlink 裁出来的，strip / debug 包会改动它的结构，一律关掉。
+options=('!strip' '!debug')
+# 没有源码：载荷直接取 CI 已经构建好的 app-image（可重定位，拷到哪都能跑）。
+source=()
+sha256sums=()
+
+package() {
+  local app="${APP_IMAGE_DIR:?必须设置 APP_IMAGE_DIR}"
+  local icon="${ICON_PNG:?必须设置 ICON_PNG}"
+
+  # 与应用自身布局一致的安装位置：jpackage 的 deb/rpm 也装到 /opt/<包名>。
+  install -dm755 "$pkgdir/opt/$pkgname"
+  cp -a "$app/." "$pkgdir/opt/$pkgname/"
+
+  # pacman 包不跑 jpackage 的 postinst，命令行入口自己建：/usr/bin/orilumn → 启动器。
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s "/opt/$pkgname/bin/Orilumn" "$pkgdir/usr/bin/$pkgname"
+
+  # 图标进 hicolor 主题，桌面文件里只写图标名，由主题解析（不像 jpackage 那样写死绝对路径，
+  # 这样换图标集/缩放比例也能找到）。
+  install -dm755 "$pkgdir/usr/share/icons/hicolor/512x512/apps"
+  install -m644 "$icon" \
+    "$pkgdir/usr/share/icons/hicolor/512x512/apps/$pkgname.png"
+
+  # 桌面入口：Categories 与 deb/rpm 的 --linux-menu-group Office 保持一致，
+  # 保证三个包装出来在应用菜单里是同一个位置。
+  install -dm755 "$pkgdir/usr/share/applications"
+  cat > "$pkgdir/usr/share/applications/$pkgname.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Orilumn
+Comment=跨平台 EPUB 阅读器
+Exec=orilumn
+Icon=orilumn
+Terminal=false
+Categories=Office;
+Keywords=epub;reader;ebook;
+EOF
+}

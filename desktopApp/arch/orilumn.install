@@ -1,0 +1,14 @@
+# 装/卸后刷新桌面数据库与图标缓存。缺了这两个命令的极简系统上静默跳过（不影响安装）。
+post_install() {
+  update-desktop-database -q /usr/share/applications 2>/dev/null || true
+  gtk-update-icon-cache -q -t /usr/share/icons/hicolor 2>/dev/null || true
+}
+
+post_upgrade() {
+  post_install
+}
+
+post_remove() {
+  update-desktop-database -q /usr/share/applications 2>/dev/null || true
+  gtk-update-icon-cache -q -t /usr/share/icons/hicolor 2>/dev/null || true
+}

@@ -132,7 +132,7 @@ Copyright (C) 2026 Orilumn contributors。
 
 随产物一起分发的第三方组件，各自保留原有许可证。
 Kotlin 标准库、kotlinx 系列、Jetpack Compose / AndroidX、Compose Multiplatform、Skiko / Skia
-等项目开发平台不计入上表。
+等项目开发平台不计入下表。
 
 | 依赖 | 用途 | 许可证 |
 |---|---|---|

@@ -11,7 +11,7 @@ pkgrel=1
 pkgdesc='跨平台 EPUB 阅读器，自研排版与翻页引擎'
 arch=('x86_64')
 url='https://github.com/orilumn/orilumn'
-license=('MIT')
+license=('AGPL-3.0-or-later')
 # 依赖按 jpackage 打 deb 时写进 control 的那串运行库折算成 Arch 的包名：
 # gtk3 是 AWT/Compose 窗口的后端（也带进 X11/GL 一整套），fontconfig/freetype2 是字体栈，
 # libglvnd 提供 libGL，alsa-lib 是 AWT 的音频依赖。

@@ -99,8 +99,8 @@ compose.desktop {
             linux {
                 iconFile.set(project.file("src/main/resources/icon.png"))
                 // RPM 的 License 字段（jpackage --linux-rpm-license-type，缺省时 jpackage 用
-                // "unknown" 会被 rpmbuild 警告）：本仓 LICENSE 是 MIT，与声明一致。
-                rpmLicenseType = "MIT"
+                // "unknown" 会被 rpmbuild 警告）：与本仓 LICENSE 一致。
+                rpmLicenseType = "AGPL-3.0-or-later"
                 // --linux-shortcut：deb/rpm 才会装 /usr/share/applications/<name>.desktop 并调
                 // xdg-desktop-menu 注册。缺省是 false，jpackage 的 DesktopIntegration 只在
                 // 「有文件关联」或「显式要快捷方式」时才生成 .desktop —— 不加这行，装完在

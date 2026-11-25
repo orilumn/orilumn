@@ -117,5 +117,51 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 
 ## License
 
-- Orilumn 代码采用 **MIT License**，见 [LICENSE](LICENSE)。
-- 第三方组件各自保留其许可证。
+Orilumn 的代码以 **[GNU Affero 通用公共许可证第 3 版（或更高版本）](LICENSE)** 授权，
+Copyright (C) 2026 Orilumn contributors。
+
+与早先的 MIT 相比，它多了三条硬约束（也是换协议的原因）：
+
+- **必须保留署名**：再分发时不得抹掉作者与项目名，改动处要标注；
+- **衍生作品必须同样开源**：改一改就闭源发布、拿去卖，不允许；
+- **通过网络提供同样算分发**：把 Orilumn 架成在线服务对外提供，也要放出源码。
+
+**0.5.11 及更早的版本仍是 MIT**（已发布的授权不可撤销）；从 0.5.12 起适用 AGPL-3.0-or-later。
+
+### 第三方依赖
+
+随产物一起分发的第三方组件，各自保留原有许可证。
+Kotlin 标准库、kotlinx 系列、Jetpack Compose / AndroidX、Compose Multiplatform、Skiko / Skia
+等项目开发平台不计入上表。
+
+| 依赖 | 用途 | 许可证 |
+|---|---|---|
+| SQLDelight | 数据库访问层 | Apache-2.0 |
+| SQLite | 嵌入式数据库 | Public Domain |
+| Ktor | 本地字体上传服务 | Apache-2.0 |
+| Okio | 跨平台文件与 zip 读取 | Apache-2.0 |
+| Ksoup | HTML 容错解析 | MIT |
+| charset、io-core | 字符集解码与字节流 | Apache-2.0 |
+| FileKit | 跨平台文件选择 | MIT |
+| JNA | 桌面端 macOS CoreText 桥接 | LGPL-2.1-or-later 或 Apache-2.0 |
+| stately | 并发数据结构 | Apache-2.0 |
+| dbus-java | 桌面端 Linux 的对话框与系统集成走 D-Bus | MIT |
+| typesafe config | 配置解析 | Apache-2.0 |
+| slf4j-api | 日志门面 | MIT |
+| jbr-api | Compose Desktop 调用的 JetBrains Runtime 增强接口 | Apache-2.0 |
+| JetBrains Runtime | 桌面运行时 | GPL-2.0 with Classpath Exception |
+| JetBrains Mono | 运行时自带字体 | OFL-1.1 |
+| Fira Code | 运行时自带字体 | OFL-1.1 |
+| Inter | 运行时自带字体 | OFL-1.1 |
+| Source Code Pro | 运行时自带字体 | OFL-1.1 |
+| Inconsolata | 运行时自带字体 | OFL-1.1 |
+| Roboto | 运行时自带字体 | Apache-2.0 |
+| Droid Sans | 运行时自带字体 | Apache-2.0 |
+| Droid Serif | 运行时自带字体 | Apache-2.0 |
+
+只在构建期使用、不随产物分发：Gradle、Android Gradle Plugin、Kotlin 编译器与各插件、
+SQLDelight 代码生成插件、JUnit 4 用 EPL-1.0、Robolectric 用 MIT。
+
+上表按桌面版运行时整理；Android 版运行时与桌面版同源，只是多带几个 AndroidX 组件，同属上述
+Compose 平台栈。完整的传递依赖清单可用
+`./gradlew :desktopApp:dependencies --configuration runtimeClasspath` 导出。

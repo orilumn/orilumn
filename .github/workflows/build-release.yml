@@ -271,6 +271,21 @@ jobs:
             "desktopApp/build/compose/binaries/main/appimage/Orilumn-${VER}-linux-x64.AppImage" \
             "$RUNNER_TEMP/appimagetool"
 
+      # Arch / EndeavourOS：pacman 包（.pkg.tar.zst）。jpackage 没有 pacman 目标，
+      # 由 make-arch-package.sh 在 archlinux 容器里用 makepkg 现造；脚本最后还会在
+      # 一个干净的 archlinux 容器里 pacman -U 装一遍自检，装不上就红在这里。
+      - name: Build pacman package (Arch / EndeavourOS)
+        run: |
+          VER=$(sed -n 's/^orilumn.versionName=//p' gradle.properties | head -1 | tr -d '[:space:]"')
+          if [ -z "$VER" ]; then
+            echo "::error::无法从 gradle.properties 读到 orilumn.versionName，拒绝命名 pacman 包。"
+            exit 1
+          fi
+          sh desktopApp/make-arch-package.sh \
+            desktopApp/build/compose/binaries/main/app \
+            "$VER" \
+            "desktopApp/build/compose/binaries/main/pacman/Orilumn-${VER}-linux-x64.pkg.tar.zst"
+
       - name: Upload DEB as workflow artifact (all runs)
         uses: actions/upload-artifact@v7
         with:
@@ -290,6 +305,13 @@ jobs:
         with:
           name: appimage-linux-x64
           path: desktopApp/build/compose/binaries/main/appimage/*.AppImage
+          if-no-files-found: error
+
+      - name: Upload pacman package as workflow artifact (all runs)
+        uses: actions/upload-artifact@v7
+        with:
+          name: pacman-linux-x64
+          path: desktopApp/build/compose/binaries/main/pacman/*.pkg.tar.zst
           if-no-files-found: error
 
   build-windows:

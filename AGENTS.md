@@ -145,11 +145,11 @@ inline-important 41`，`UA 10 / UA-important 50`；读者三层**严格夹在 41
    `https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-<版本>-windows-x64.msi`：
    `releases/latest/download/<文件名>` 是按**精确资产名**找文件的，文件名里带版本号，
    版本一升、README 里还留着旧版本号就 404。所以 **bump 提交里必须同步改 README 的
-   7 个下载链接的文件名**（带 `latest` 前缀是为了不用改 tag，只改文件名里的版本号）。
+   8 个下载链接的文件名**（带 `latest` 前缀是为了不用改 tag，只改文件名里的版本号）。
    改完逐条核对：链接里的资产名必须与 `build-release.yml` 里
    `Rename … with version` 生成的最终文件名**逐字一致**——APK 是小写 `orilumn-<版本>-android.apk`，
    桌面产物是大写 `Orilumn-<版本>-…`；平台后缀见该文件（`macos-x64` / `macos-arm64` /
-   `linux-x64.deb` / `linux-x64.rpm` / `linux-x64.AppImage` / `windows-x64.msi`）。
+   `linux-x64.deb` / `linux-x64.rpm` / `linux-x64.AppImage` / `linux-x64.pkg.tar.zst` / `windows-x64.msi`）。
    发布后拿 `gh release view --json assets -q '.assets[].name'` 对一遍最省事。
 
 ## 平板日志（无线 adb，vivo PA2353）

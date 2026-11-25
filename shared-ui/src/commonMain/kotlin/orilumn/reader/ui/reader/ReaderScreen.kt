@@ -343,6 +343,9 @@ fun ReaderScreen(
     // 批注输入条的内容（D-27）：它与浮动菜单**同开同关**，所以不需要自己的「打开」状态。
     // 文字提到这里（而不是留在输入框里），是因为点色槽落笔时要把它一起写进新记录。
     var noteText by remember { mutableStateOf("") }
+    // 修订 ⇄ 批注切换时 noteText 不清空（切回来要原样恢复）。这个标记告诉「卡片目标变化」的
+    // effect：这次只是换模式，不是换了选区。
+    var noteDraftStashed by remember { mutableStateOf(false) }
     // 新建时用哪一类落笔：跟着操作栏顶部的 tab 走（读者切到「划线」，写下的批注就是划线的）。
     var noteKind by remember { mutableStateOf(AnnotationKind.Highlight) }
     // 新建 / 改型时用哪一线型：线型按钮**只选中**（D-28），落笔由点色槽或 `确定` 触发。
@@ -356,6 +359,9 @@ fun ReaderScreen(
     var textEditStart by remember { mutableIntStateOf(0) }
     var textEditEnd by remember { mutableIntStateOf(0) }
     var textEditText by remember { mutableStateOf("") }
+    // 修改卡里有没有可恢复的草稿：切到批注再点回「修订」时沿用（输入框里的文字与选区不许丢）。
+    // 确定 / 取消 / 换目标都清掉，避免把上一段的改写带进新选区。
+    var textEditDraft by remember { mutableStateOf(false) }
     // 开卡时选区的**行内结构**（已换算到输入区那把尺）与纯文字：提交时原样没变就直接短路，
     // 不白落一条修订；属性补回（读者没写的 class / id）也拿它当模板。
     var textEditOriginalSpans by remember {
@@ -457,6 +463,7 @@ fun ReaderScreen(
         magnifierFinger = null
         editingAnnotation = null
         noteText = ""
+        noteDraftStashed = false
     }
     // 标注清单里删了当前章的标注：重读本章，屏幕上的装饰同步消失（与进章 effect 分离，见参数注释）。
     LaunchedEffect(currentHost, annotationsEpoch) {
@@ -473,9 +480,11 @@ fun ReaderScreen(
         magnifierFinger = null
         editingAnnotation = null
         noteText = ""
+        noteDraftStashed = false
         textEditOpen = false
         textEditText = ""
         textEditDirty = false
+        textEditDraft = false
     }
     // 选区被任何路径清空时，菜单必须同步收起（避免留下指向空选区的浮层）。
     LaunchedEffect(selection.hasSelection) {
@@ -500,6 +509,7 @@ fun ReaderScreen(
         editingAnnotation = null
         // 批注输入条同理：它写的是旧页上的那条标注，翻页后不该继续挂着。
         noteText = ""
+        noteDraftStashed = false
         if (wasEditing) {
             // 编辑时恢复出来的选区只服务于那张卡；卡收了就一起收掉，免得留下无主手柄。
             selectionMenuVisible = false
@@ -1454,6 +1464,7 @@ fun ReaderScreen(
         textEditText = InlineMarkup.show(segments, visible + own)
         textEditBaseCard = textEditText
         textEditFromRevision = false
+        textEditDraft = true
         return true
     }
 
@@ -1502,11 +1513,12 @@ fun ReaderScreen(
         }
         closeAnnotationEdit()
         magnifierFinger = null
-        noteText = ""
+        // 批注草稿不清空：从批注切过来的「修订」要在切回去时原样恢复（用户定口）。
         if (blockRange != null && openTextEditAt(p.chapter, blockRange.first, blockRange.last + 1)) {
             // 卡里已是「改完的整段」：落笔前不许用手柄把它换回原文，提交时也按重开旧修订算。
             textEditDirty = true
             textEditFromRevision = true
+            textEditDraft = true
             textEditOpen = true
             textEditBusy = false
             textEditError = null
@@ -1604,6 +1616,7 @@ fun ReaderScreen(
         textEditDirty = true
         textEditFromRevision = true
         textEditError = null
+        textEditDraft = true
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
@@ -1745,7 +1758,11 @@ fun ReaderScreen(
             textEditOpen = false
             textEditText = ""
             textEditDirty = false
+            textEditDraft = false
             textEditBusy = false
+            // 取消整张卡：批注那边的暂存一并作废。
+            noteText = ""
+            noteDraftStashed = false
             if (selection.hasSelection) selection.clear()
             return
         }
@@ -1754,6 +1771,11 @@ fun ReaderScreen(
         if (editingAnnotation != null) {
             focusManager.clearFocus()
             noteText = ""
+            noteDraftStashed = false
+            // 修订那边的暂存同样作废。
+            textEditText = ""
+            textEditDirty = false
+            textEditDraft = false
             notePickedColors.clear()
             selectionMenuVisible = false
             if (selection.hasSelection) selection.clear()
@@ -1782,6 +1804,12 @@ fun ReaderScreen(
         if (selection.hasSelection) {
             selection.clear()
             selectionMenuVisible = false
+            // 卡片就此收起：批注与修订两边写了一半的暂存一并作废（取消语义）。
+            noteText = ""
+            noteDraftStashed = false
+            textEditText = ""
+            textEditDirty = false
+            textEditDraft = false
             return
         }
         // P4-c2u: 链接优先——点中链接字形即导航，未中才走三区（翻页/栏显隐）。
@@ -1928,6 +1956,11 @@ fun ReaderScreen(
         val picked = pickedByKind[kind]
         val style = noteLineStyle
         noteText = ""
+        noteDraftStashed = false
+        // 落笔后整张卡收掉：修订那边的暂存也不再恢复。
+        textEditText = ""
+        textEditDirty = false
+        textEditDraft = false
         notePickedColors.clear()
         val editing = editingAnnotation
         if (editing != null) {
@@ -1997,6 +2030,12 @@ fun ReaderScreen(
         // 同上：取消也先失焦，键盘跟着卡片一起落（D-30）。
         focusManager.clearFocus()
         noteText = ""
+        noteDraftStashed = false
+        // 整张卡都取消了：修订那边的暂存也一并作废。
+        textEditText = ""
+        textEditDirty = false
+        textEditDraft = false
+        textEditError = null
         notePickedColors.clear()
         val editing = editingAnnotation
         if (editing != null) {
@@ -2280,6 +2319,7 @@ fun ReaderScreen(
         textEditDirty = false
         textEditFromRevision = false
         textEditError = null
+        textEditDraft = true
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
@@ -2334,15 +2374,22 @@ fun ReaderScreen(
         val ch = selection.chapter
         val s = selection.start
         val e = selection.endExclusive
-        if (!setTextEditTarget(ch, s, e)) {
-            snackbar.show("本章内容尚未就绪")
-            return
+        // 从批注切回修订：落笔范围与上次那一段一致就沿用输入区草稿（切来切去不许丢字）。
+        // 换了选区才算新目标，按新选区重新开卡（旧改写作废，不能带进新范围）。
+        val resumeDraft = textEditDraft &&
+            ch == textEditChapter && s == textEditStart && e == textEditEnd
+        if (!resumeDraft) {
+            if (!setTextEditTarget(ch, s, e)) {
+                snackbar.show("本章内容尚未就绪")
+                return
+            }
+            // 重开已有修订时输入区是改后整段，按「已动过」算；新选区才允许拖手柄把原文换进输入区。
+            textEditDirty = textEditFromRevision
+            textEditError = null
         }
         closeAnnotationEdit()
-        noteText = ""
-        // 重开已有修订时输入区是改后整段，按「已动过」算；新选区才允许拖手柄把原文换进输入区。
-        textEditDirty = textEditFromRevision
-        textEditError = null
+        // 批注草稿**不清空**：切回「高亮 / 划线」时原样恢复（与修订草稿对等暂存）。
+        textEditDraft = true
         textEditOpen = true
         textEditBusy = false
         selectionMenuVisible = false
@@ -2361,6 +2408,10 @@ fun ReaderScreen(
         textEditOpen = false
         textEditText = ""
         textEditDirty = false
+        textEditDraft = false
+        // 整张卡都取消了：批注那边的暂存也一并作废，不能留到下一次开卡。
+        noteText = ""
+        noteDraftStashed = false
         textEditError = null
         textEditOriginalSpans = null
         textEditAmbientSpans = emptyList()
@@ -2524,6 +2575,9 @@ fun ReaderScreen(
             textEditOpen = false
             textEditText = ""
             textEditDirty = false
+            textEditDraft = false
+            noteText = ""
+            noteDraftStashed = false
             textEditOriginalSpans = null
             textEditAmbientSpans = emptyList()
             textEditOwnTags = null
@@ -2557,6 +2611,9 @@ fun ReaderScreen(
                     textEditOpen = false
                     textEditText = ""
                     textEditDirty = false
+                    textEditDraft = false
+                    noteText = ""
+                    noteDraftStashed = false
                     textEditError = null
                     textEditOriginalSpans = null
                     textEditAmbientSpans = emptyList()
@@ -2640,6 +2697,9 @@ fun ReaderScreen(
             textEditOpen = false
             textEditText = ""
             textEditDirty = false
+            textEditDraft = false
+            noteText = ""
+            noteDraftStashed = false
             textEditRevision++
             chapterRevisions = emptyList()
             selection.clear()
@@ -2653,14 +2713,13 @@ fun ReaderScreen(
     /**
      * 正文修改卡上点「高亮 / 划线」：**切回该类别的批注**（同一根操作栏，不另起一套）。
      *
-     * 与取消的区别：这里**保留选区**（切过去就是要落这一笔），只丢掉还没提交的输入。
+     * 与取消的区别：这里**保留选区**（切过去就是要落这一笔），修订草稿也原样留着——
+     * 再点「修订」就按原文字与输入框选区恢复，来回切多少次都不丢。
      */
     fun switchTextEditToAnnotation(kind: AnnotationKind) {
         textEditOpen = false
-        textEditText = ""
-        textEditDirty = false
+        // textEditText / textEditDirty / 元素结构一概不动：切回修订时沿用这份草稿。
         textEditBusy = false
-        noteText = ""
         noteKind = kind
         noteLineStyle = annotationLastLineStyleOf(light)
         val next = withAnnotationLastKind(light, kind)
@@ -4264,7 +4323,7 @@ fun ReaderScreen(
             // 标注卡片（D-28）：操作栏 + 输入行合成一张卡，贴键盘上沿。它不再跟选区锚点走，
             // 所以选区在页面任何位置都不用担心「菜单跑出屏幕」；被遮住时整页上顶（第 2 部分）。
             // 输入框与操作栏跟着「这一次写哪条」重置：编辑带出它的文字 / 类别 / 线型，新选区从空白开始。
-            LaunchedEffect(editing?.id, selectionMenuOn) {
+            LaunchedEffect(editing?.id, selectionMenuOn, textEditOpen) {
                 // 换一条（新建 ↔ 编辑、或换编辑对象）就清掉「临时选过的颜色」：那是上一次的意图。
                 notePickedColors.clear()
                 when {
@@ -4273,13 +4332,34 @@ fun ReaderScreen(
                         noteKind = editing.kind
                         noteLineStyle = editing.lineStyle.takeIf { editing.kind == AnnotationKind.Underline }
                             ?: annotationLastLineStyleOf(light)
+                        noteDraftStashed = false
+                        // 换了一条记录就是新目标：上一段修订草稿不能带过来。
+                        textEditText = ""
+                        textEditDirty = false
+                        textEditDraft = false
                     }
+                    // 批注 → 修订：noteText 原样留着，切回来要恢复（只是换模式，不是换目标）。
+                    // 标记无条件置上：批注那边即使没写字，修订草稿也要留着，不能被当成「新选区」清掉。
+                    textEditOpen -> noteDraftStashed = true
+                    // 修订 → 批注：恢复暂存的文字；类别 / 线型已由切换那一处按点的项目设好，这里不重置。
+                    selectionMenuOn && noteDraftStashed -> noteDraftStashed = false
                     selectionMenuOn -> {
                         noteText = ""
                         noteKind = annotationLastKindOf(light)
                         noteLineStyle = annotationLastLineStyleOf(light)
+                        noteDraftStashed = false
+                        // 新选区：修订草稿属于上一段，同样作废。
+                        textEditText = ""
+                        textEditDirty = false
+                        textEditDraft = false
                     }
-                    else -> noteText = ""
+                    else -> {
+                        noteText = ""
+                        noteDraftStashed = false
+                        textEditText = ""
+                        textEditDirty = false
+                        textEditDraft = false
+                    }
                 }
             }
             // 输入区跟着选区走（用户定口）：正文修改卡开着时，拖两端手柄换一段选区——

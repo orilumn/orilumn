@@ -4,6 +4,8 @@ import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +46,8 @@ import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.SpanStyle
@@ -182,36 +186,70 @@ internal fun AnnotationSheet(
 ) {
     val p = palette
     // 输入框内部要光标与选区，所以持 TextFieldValue；外面只认纯文本（点色槽时要读它）。
-    var value by remember { mutableStateOf(TextFieldValue(text, TextRange(text.length))) }
-    LaunchedEffect(text) {
-        if (text == value.text) return@LaunchedEffect
-        // 换文字不等于丢选区（用户定口）：调正文选区时输入区里已经选好的那一段要留着，
+    var value by remember { mutableStateOf(defaultInput(text, mode)) }
+    // 修订 ⇄ 批注切换时，两种模式各自的输入状态（文字 + 选区）暂存在这里，切回来原样恢复：
+    // 读者写了一半正文修改、点「高亮」看一眼，再点回「修订」，字与选中那一段都还在。
+    // 卡片收起即作废：暂存只在这一次卡片会话里有效。
+    var annotationInput by remember { mutableStateOf<TextFieldValue?>(null) }
+    var textEditInput by remember { mutableStateOf<TextFieldValue?>(null) }
+    var shownMode by remember { mutableStateOf(mode) }
+    var shownText by remember { mutableStateOf(text) }
+    var wasVisible by remember { mutableStateOf(false) }
+    LaunchedEffect(visible, mode, text) {
+        if (!visible) {
+            wasVisible = false
+            annotationInput = null
+            textEditInput = null
+            shownMode = mode
+            shownText = text
+            return@LaunchedEffect
+        }
+        // 新开一张卡：不沿用上一次会话的选区（卡片可能在收起动画里还没卸载）。
+        if (!wasVisible) {
+            wasVisible = true
+            annotationInput = null
+            textEditInput = null
+            value = defaultInput(text, mode)
+            shownMode = mode
+            shownText = text
+            return@LaunchedEffect
+        }
+        // 修订 ⇄ 批注：从新模式的暂存里恢复，离开的那一边不能拿失焦后的 `value` 覆盖。
+        if (mode != shownMode) {
+            val leaving = if (shownMode == NoteSheetMode.TextEdit) textEditInput else annotationInput
+            // 点操作栏会让输入框失焦；BasicTextField 失焦时会把选区收成光标（deselect）。
+            // 操作栏按下那一刻已把失焦前的文字与选区暂存好，这里若再用收拢后的 value 覆盖，
+            // 选区就白存了。只有暂存不在、或文字已经换了，才按当前 value 记。
+            if (!(value.selection.collapsed && leaving != null && leaving.text == value.text)) {
+                if (shownMode == NoteSheetMode.TextEdit) {
+                    textEditInput = value.withoutComposition()
+                } else {
+                    annotationInput = value.withoutComposition()
+                }
+            }
+            val restored = if (mode == NoteSheetMode.TextEdit) textEditInput else annotationInput
+            value = when {
+                restored != null && restored.text == text -> restored
+                // 暂存里的文字与这次来的目标不是同一段（期间换过选区）：只把选区夹进新文字，
+                // 不能把旧文字带进来。
+                restored != null -> TextFieldValue(text, selectionForChangedText(restored, text))
+                else -> defaultInput(text, mode)
+            }
+            shownMode = mode
+            shownText = text
+            return@LaunchedEffect
+        }
+        if (text == shownText) return@LaunchedEffect
+        // 这一版文字就是输入框自己刚打出来的（onValueChange 已连选区一起更新）：
+        // 只需记下，不能再按「外部换文字」重算选区，否则每敲一个字都会整段全选。
+        if (value.text == text) {
+            shownText = text
+            return@LaunchedEffect
+        }
+        // 同一模式内换文字不等于丢选区（用户定口）：调正文选区时输入区里已经选好的那一段要留着，
         // 否则读者刚全选（开卡默认）或手选了一段，一拖正文手柄就退回一个光标。
-        val old = value
-        val sel = when {
-            // 新开卡时原来还是空的：光标落在末尾（随后由下面的 TextEdit 规则整段全选）。
-            old.text.isEmpty() -> TextRange(text.length)
-            // 之前是整段全选（开卡默认，或上一次跟着正文选区换过来的）⇒ 新文字照样整段全选。
-            old.selection.start == 0 && old.selection.end == old.text.length ->
-                TextRange(0, text.length)
-            // 读者在输入区里点了一下、把选区收成一个光标（取消全选）：下次正文选区换文字时
-            // **重新整段全选**，跟没取消过一样（用户定口）。只有「手选了中间某一段」才保留偏移。
-            old.selection.collapsed -> TextRange(0, text.length)
-            // 手选的某一段：偏移照旧，只把越界的那头收进新文字里。
-            else -> TextRange(
-                old.selection.start.coerceIn(0, text.length),
-                old.selection.end.coerceIn(0, text.length),
-            )
-        }
-        value = TextFieldValue(text, sel)
-    }
-    // 进入正文修改状态（卡片新开、或从批注切到「修订」）默认全选输入框里的文字：
-    // 读者直接打字就是整段替换，不用先手动全选（用户定口）。键只取 visible / mode，
-    // 打字时两者不变，所以不会每敲一个字就重新全选。
-    LaunchedEffect(visible, mode) {
-        if (visible && mode == NoteSheetMode.TextEdit) {
-            value = TextFieldValue(text, TextRange(0, text.length))
-        }
+        value = TextFieldValue(text, selectionForChangedText(value, text))
+        shownText = text
     }
     val focus = remember { FocusRequester() }
 
@@ -262,7 +300,9 @@ internal fun AnnotationSheet(
 
     // 打开即聚焦：移动端顺带把键盘顶起来，卡片自己贴到键盘上沿（imePx 逐帧跟随）。
     // 用 visible 当键：收起动画还在跑时卡片没卸载，光靠 annotationId 不会重新请求焦点。
-    LaunchedEffect(visible, target.annotationId) { if (visible) focus.requestFocus() }
+    // mode 也是键：点操作栏切换修订 / 批注会把焦点交给按钮，切回输入区时要重新聚焦，
+    // 恢复出来的选区才会显示、也才能接着编辑（失焦状态下选区底色在，但手柄与光标不出现）。
+    LaunchedEffect(visible, target.annotationId, mode) { if (visible) focus.requestFocus() }
     // Android 返回键 / 桌面 Esc = 取消（不是「保存后退出」，落笔只认确定与点卡片外）。
     BackHandler(enabled = visible) { onCancel() }
 
@@ -303,7 +343,24 @@ internal fun AnnotationSheet(
         // 取消仍是点卡片外 / 返回键 / Esc（落笔只认 `确定`）。
         // 操作栏实测高度是给输入框算「还能长几行」用的（换行排布时它自己会变高）。
         var barHeightPx by remember { mutableStateOf(0) }
-        Box(Modifier.fillMaxWidth().onSizeChanged { barHeightPx = it.height }) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .onSizeChanged { barHeightPx = it.height }
+                // 操作栏上的点按会让输入框失焦，BasicTextField 失焦时会把手里的选区收成光标。
+                // 在 Initial 阶段（子项处理之前）先把这一刻的状态按当前模式暂存，切换模式时才有
+                // 「失焦前选中的那一段」可恢复；不消费事件，点按照旧交给按钮。
+                .pointerInput(mode) {
+                    awaitEachGesture {
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+                        if (mode == NoteSheetMode.TextEdit) {
+                            textEditInput = value.withoutComposition()
+                        } else {
+                            annotationInput = value.withoutComposition()
+                        }
+                    }
+                },
+        ) {
             AnnotationActionBar(
                 palette = p,
                 kind = kind,
@@ -404,6 +461,16 @@ internal fun AnnotationSheet(
                             value = value,
                             onValueChange = {
                                 value = it
+                                // 记住这一模式最近一次真实选区：点操作栏失焦时 BasicTextField 会先把
+                                // 手里的选区收成光标（deselect），暂存早于失焦的选区，切模式才恢复得回来。
+                                // 收拢成光标的变更不写暂存，否则失焦那一下就把选区盖掉了。
+                                if (!it.selection.collapsed) {
+                                    if (mode == NoteSheetMode.TextEdit) {
+                                        textEditInput = it.withoutComposition()
+                                    } else {
+                                        annotationInput = it.withoutComposition()
+                                    }
+                                }
                                 onTextChange(it.text)
                             },
                             modifier = Modifier
@@ -494,6 +561,47 @@ private val NoteFieldChrome = 16.dp + 14.dp + 1.dp + 4.dp
 /** 输入框正文与提示字共用的字面（两者行高必须一致，否则空框和有字时高度不同）。 */
 private val NoteTextLineHeight = 23.sp
 private val NoteTextStyle = TextStyle(fontSize = 16.sp, lineHeight = NoteTextLineHeight)
+
+/**
+ * 新开一张卡 / 第一次进某一模式时输入框的初始选区。
+ *
+ * 正文修改整段全选：读者直接打字就是整段替换，不用先手动全选（用户定口）。
+ * 批注从末尾起笔（空框时就是 0）。
+ */
+private fun defaultInput(text: String, mode: NoteSheetMode): TextFieldValue =
+    if (mode == NoteSheetMode.TextEdit) {
+        TextFieldValue(text, TextRange(0, text.length))
+    } else {
+        TextFieldValue(text, TextRange(text.length))
+    }
+
+/**
+ * 暂存只留文字与选区：输入法还没上屏的拼写（composition）属于**当前这次**输入会话，
+ * 切模式会先失焦、结束会话，恢复时把旧 composition 带回来只会让输入法停在半截状态。
+ */
+private fun TextFieldValue.withoutComposition(): TextFieldValue = TextFieldValue(text, selection)
+
+/**
+ * 外部文字换了以后，输入框里原来的选区该落到哪。
+ *
+ * 这条规则服务「调整正文选区时输入框跟着换文字」：开卡默认整段全选、读者手选的一段都保留；
+ * 读者把选区收成光标（取消全选）后，下次换文字要重新整段全选（与没取消过一样）。
+ * 只有「手选了中间某一段」才保留偏移。
+ */
+private fun selectionForChangedText(old: TextFieldValue, text: String): TextRange = when {
+    // 新开卡时原来还是空的：光标落在末尾（随后由正文修改规则整段全选）。
+    old.text.isEmpty() -> TextRange(text.length)
+    // 之前是整段全选（开卡默认，或上一次跟着正文选区换过来的）⇒ 新文字照样整段全选。
+    old.selection.start == 0 && old.selection.end == old.text.length -> TextRange(0, text.length)
+    // 读者在输入区里点了一下、把选区收成一个光标（取消全选）：下次正文选区换文字时
+    // **重新整段全选**，跟没取消过一样（用户定口）。只有「手选了中间某一段」才保留偏移。
+    old.selection.collapsed -> TextRange(0, text.length)
+    // 手选的某一段：偏移照旧，只把越界的那头收进新文字里。
+    else -> TextRange(
+        old.selection.start.coerceIn(0, text.length),
+        old.selection.end.coerceIn(0, text.length),
+    )
+}
 
 /** 自绘光标的宽度与闪烁周期（毫秒）：硬开关，不做系统光标那种透明度渐变。 */
 private val CaretWidth = 2.dp

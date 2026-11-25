@@ -1,6 +1,7 @@
 package orilumn.reader.ui.reader.curl
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -180,8 +181,36 @@ internal fun DrawScope.drawCurl3DFrame(
     )
 
     // ③ 网格几何
+    //
+    // 整张纸只贴**一张不透明贴图**：有覆盖层（旁注 + 页码）时先把页栅格与覆盖层合成一张
+    // 整页图（见 [CurlPageBake]）。分两遍画不行：覆盖层是透明底的，网格那条路径会把它的
+    // 透明像素抬成白色，卷起来的纸整个刷白、只剩旁注 —— 读者报的「反面没有文字，只有批注」。
+    //
+    // 贴图先取（下面 ⑥ 才用它画），因为**版心的两条竖边要当扫线补进网格**
+    //（见 [buildCurlMesh] 的 `materialRect`）：页栅格只有版心那么大，它的边与扫线平行时
+    // 不补这一行，版心与页边距之间就会漏出一条缝。
+    val sheet = front.bake.textureOf(
+        images = front,
+        pageW = w,
+        pageH = h,
+        paperArgb = paperArgb,
+        texLeft = frontTex.x,
+        texTop = frontTex.y,
+    )
     val radius = curlRadius(shape, radiusRatio)
-    val mesh = buildCurlMesh(shape, radius = radius, splits = CURL3D_SPLITS)
+    val mesh = buildCurlMesh(
+        shape = shape,
+        radius = radius,
+        splits = CURL3D_SPLITS,
+        materialRect = sheet?.let {
+            Rect(
+                left = it.texLeft,
+                top = it.texTop,
+                right = it.texLeft + it.texture.image.width,
+                bottom = it.texTop + it.texture.image.height,
+            )
+        },
+    )
     if (mesh.indexCount == 0) return false
 
     // 折痕坐标系（与 [buildCurlMesh] 同一套）：t 沿折痕向下，nR 是法向（指向 +x 一侧），
@@ -247,17 +276,6 @@ internal fun DrawScope.drawCurl3DFrame(
     // 明暗只画在**看得见**的那一面：纸卷隆起后外层是纸背（Verso，z ≥ R，压在正面那半圈之上），
     // 没绕到九十度时只有正面（Recto）露在外面。给被压住的那一段画明暗等于白画。
     val hasVerso = mesh.bands.any { it.surface == CurlMesh.Surface.Verso }
-    // 整张纸只贴**一张不透明贴图**：有覆盖层（旁注 + 页码）时先把页栅格与覆盖层合成一张
-    // 整页图（见 [CurlPageBake]）。分两遍画不行：覆盖层是透明底的，网格那条路径会把它的
-    // 透明像素抬成白色，卷起来的纸整个刷白、只剩旁注 —— 读者报的「反面没有文字，只有批注」。
-    val sheet = front.bake.textureOf(
-        images = front,
-        pageW = w,
-        pageH = h,
-        paperArgb = paperArgb,
-        texLeft = frontTex.x,
-        texTop = frontTex.y,
-    )
     // 纸边被卷起来时可以略微探出页面（斜折痕 + 抬起的纸），画布裁到页面内即可。
     clipRect(0f, 0f, w, h) {
         fun drawBand(band: CurlMesh.Band) {

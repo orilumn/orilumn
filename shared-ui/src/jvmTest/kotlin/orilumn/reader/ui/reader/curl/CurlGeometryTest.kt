@@ -330,6 +330,37 @@ class CurlGeometryTest {
     }
 
     /**
+     * 左半屏起手（折痕锚点）**手指往上滑**：折痕仍穿过手指，不反向跑。
+     *
+     * 读者原话：「左半屏起手（折痕锚点）时手指向上，折痕反向运行并脱离手指。」倾斜量按竖向
+     * 行程算，往上滑时是大负数，折痕下端被甩到页左边好几页宽以外；上一版在 [curlShape] 里
+     * **单独夹端点**，下端被夹住、上端照旧甩出去 —— 折痕这条线被掰弯，手指还在原处，折痕
+     * 在手指那一行已经跑掉 1500px 以上（实测：按下 (460,1400)，手指上移 200/400/600px 时
+     * 折痕落在 x = 2211/2131/1965）。现在收的是**倾斜**（`leanWithinPageEnds`），折痕位置
+     * 仍由手指反解，所以「折痕穿过手指」必须原样成立，端点也不许越界。
+     */
+    @Test
+    fun creaseAnchorStaysUnderTheFingerWhenDraggedUpward() {
+        val w = 1840f
+        val h = 2800f
+        val exit = w * CURL3D_RADIUS_RATIO
+        val press = Offset(460f, 1400f)
+        for (dy in listOf(-200f, -400f, -600f, 200f, 400f, 600f)) {
+            val to = Offset(press.x, press.y + dy)
+            val pull = CurlPull(from = press, to = to, anchor = CurlAnchor.Crease)
+            val tilt = leanOf(pull, w, h)
+            val s = curlShape(w, h, 0.3f, 1, tilt = tilt, pull = pull)
+            val atFinger = s.topX + (s.bottomX - s.topX) * (to.y / h)
+            assertEquals("dy=$dy 折痕应当仍穿过手指", to.x, atFinger, 0.01f)
+            assertTrue("dy=$dy 折痕上端越界：topX=${s.topX}", s.topX >= -exit - 0.01f)
+            assertTrue("dy=$dy 折痕下端越界：bottomX=${s.bottomX}", s.bottomX >= -exit - 0.01f)
+            // 收的是倾斜、不是端点：倾斜确实被收过（否则这一帧不成立），但没被收成竖直。
+            assertTrue("dy=$dy 倾斜不该被收平：$tilt", kotlin.math.abs(tilt) > 0.05f)
+            assertEquals("dy=$dy 形状里的倾斜必须就是收过的那个", tilt, s.lean, 1e-4f)
+        }
+    }
+
+    /**
      * 读者口径（2026-11-21）：跟手帧里**左下角一律可以卷到纸卷右侧**，左右半边起手一样。
      *
      * 手指从下半屏往左上拖，纸角向上转（`lean < 0`），折痕下端因此越过左下角——它落在纸卷

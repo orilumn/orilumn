@@ -1121,6 +1121,101 @@ class Curl3DRenderTest {
     }
 
     /**
+     * 版心（页栅格）与页边距之间**不许漏出一条缝**。
+     *
+     * 读者原话：「两侧页边距各有一条几像素宽的接缝，漏出下一页的字；右侧在卷起的当前页
+     * 正面页边距位置，左侧在反面页边距位置，只有没几个像素宽。」纸上的内容分两截画：
+     * 版心那一截贴页栅格，页边距那一截垫纸色。两截都按**扫线行**切，而折痕竖直时扫线与
+     * 版心的竖边平行 —— 版心的边正好落在两行之间，那一格既不算「版心内」（栅格不到那儿）
+     * 也不算「页边距」，谁都不画，底下那张露出页的字就从这条缝里透出来。
+     *
+     * 判据：正面页栅格整片填纸色（缝里透出什么颜色都看得见），露出页填一个扎眼的品红，
+     * 然后逐段扫纸带的轮廓 —— 轮廓里（让开边缘 2px 的抗锯齿）出现品红就是漏。
+     */
+    @Test
+    fun marginSeamDoesNotLeakTheRevealedPage() {
+        val w = 920
+        val h = 1400
+        val mx = 62
+        val my = 100
+        val bw = w - mx * 2
+        val bh = h - my * 2
+        val tex = Offset(mx.toFloat(), my.toFloat())
+        val front = solid(bw, bh, paper)
+        val back = solid(bw, bh, 0xFFE020A0.toInt())
+        for (p in listOf(0.15f, 0.3f, 0.45f, 0.6f, 0.8f)) {
+            for (dir in listOf(1, -1)) {
+                for (tilt in listOf(0f, 0.3f)) {
+                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
+                    val mesh = buildCurlMesh(shape, curlRadius(shape))
+                    if (mesh.indexCount == 0) continue
+                    val px = render(shape, front, back, frontTex = tex, backTex = tex).toPixelMap()
+                    var worst = 0
+                    var where = ""
+                    for (band in mesh.bands) {
+                        val ring = mesh.bandOutline(band)
+                        if (ring.size < 3) continue
+                        val ranges = fillRanges(ring, w, h)
+                        for (y in 0 until h) {
+                            val rg = ranges[y] ?: continue
+                            var k = 0
+                            while (k + 1 < rg.size) {
+                                // 边上的抗锯齿是另一码事，只判轮廓内侧 2px 以外。
+                                for (x in (rg[k] + 2)..(rg[k + 1] - 2)) {
+                                    if (x < 0 || x >= w) continue
+                                    val c = px[x, y]
+                                    val magenta = c.red > 0.6f && c.blue > 0.35f && c.green < 0.35f
+                                    if (magenta) {
+                                        var run = 1
+                                        while (x + run < rg[k + 1] - 2 && run < 64) {
+                                            val c2 = px[x + run, y]
+                                            if (!(c2.red > 0.6f && c2.blue > 0.35f && c2.green < 0.35f)) break
+                                            run++
+                                        }
+                                        if (run > worst) {
+                                            worst = run
+                                            where = "${band.surface}($x..${x + run - 1}, $y)"
+                                        }
+                                        k += 2
+                                        break
+                                    }
+                                }
+                                if (worst >= 64) break
+                                k += 2
+                            }
+                        }
+                    }
+                    assertTrue(
+                        "p=$p dir=$dir tilt=$tilt 纸带里漏出了露出页：$where 连了 $worst px",
+                        worst <= 2,
+                    )
+                }
+            }
+        }
+    }
+
+    /** 多边形扫描线填充：每行给出落在多边形内的 x 区间（成对出现）。 */
+    private fun fillRanges(pts: List<Offset>, w: Int, h: Int): Array<IntArray?> {
+        val out = arrayOfNulls<IntArray>(h)
+        for (y in 0 until h) {
+            val sy = y + 0.5f
+            val xs = ArrayList<Float>(8)
+            for (i in pts.indices) {
+                val a = pts[i]
+                val b = pts[(i + 1) % pts.size]
+                if ((a.y <= sy && b.y > sy) || (b.y <= sy && a.y > sy)) {
+                    xs.add(a.x + (b.x - a.x) * (sy - a.y) / (b.y - a.y))
+                }
+            }
+            if (xs.size >= 2) {
+                xs.sort()
+                out[y] = IntArray(xs.size / 2 * 2) { xs[it].toInt().coerceIn(0, w - 1) }
+            }
+        }
+        return out
+    }
+
+    /**
      * 卷筒与纸正面交界处**不能有一条纸色接缝线**。
      *
      * 两层各自抗锯齿叠在同一条边上时，交界那一列像素拿到「半列纸色 + 半列纹理」，比两侧都亮 ——
@@ -1149,8 +1244,14 @@ class Curl3DRenderTest {
                     val pm = render(shape, body, body, frontTex = bodyTex, backTex = bodyTex)
                         .toPixelMap()
                     fun lum(xx: Int, yy: Int): Float {
-                        val c = pm[xx, yy]
+                        val c = pm[xx.coerceIn(0, w - 1), yy.coerceIn(0, h - 1)]
                         return (c.red + c.green + c.blue) / 3f
+                    }
+                    /** 折痕附近 5×5 里最亮的一格：用来判断**真的有纸**贴在这儿，还是只是两条边的抗锯齿。 */
+                    fun boxMax(xx: Int, yy: Int): Float {
+                        var best = 0f
+                        for (dy in -2..2) for (dx in -2..2) best = maxOf(best, lum(xx + dx, yy + dy))
+                        return best
                     }
                     var worst = 0f
                     var where = ""
@@ -1164,6 +1265,11 @@ class Curl3DRenderTest {
                         // 折痕自己或任一侧已经是纸色：这一行是页边距压着折痕，跳过。
                         // 两侧明暗差得远（一侧纸、一侧正文）说明这一行是**内容边界**，缝判不出来。
                         if (m >= 0.9f || l >= 0.9f || r >= 0.9f) continue
+                        // 折痕正好压在**正文块的角**（或页边拐角）上时，那一列的纸边覆盖率是
+                        // 0 与 1 之间的某个值，比两侧亮是「纸 / 墨」的抗锯齿，不是缝。
+                        // 判据取「5×5 里有没有一整格纸色」（满纸色约 0.93）：真缝只是相邻两条边
+                        // 各自抗锯齿、覆盖率合不成 1，峰值实测只有 0.5 上下，不会被误跳。
+                        if (boxMax(x, y) >= 0.9f) continue
                         if (abs(l - r) > 0.2f) continue
                         judged++
                         val gap = m - (l + r) / 2f

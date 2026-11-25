@@ -266,7 +266,57 @@ internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
     val ax = kotlin.math.abs(u.x).coerceAtLeast(1e-4f)
     val wanted = u.y / ax * h / (2f * tiltW)
     val cap = verticalLeanCap(pull, tiltW)
-    return wanted.coerceIn(-cap, cap)
+    return leanWithinPageEnds(pull, w, h, wanted.coerceIn(-cap, cap))
+}
+
+/**
+ * 倾斜量的**书脊侧端点**上限：折痕下端（或上端）不许越过书脊一个筒径
+ *（`−R`，见 [curlShape] 的 `clampLo`）。
+ *
+ * ## 它修的是「手指向上、折痕反向跑掉、手指脱离折痕」
+ *
+ * 折痕两端是 `foldX ∓ lean·tiltW`（[curlShape]），而 `foldX` 由手指反解。左半边起手抓的是
+ * **折痕**（[creaseFoldX]），手指往上滑时 `lean` 变成大负数，折痕下端被甩到页左边好几页宽
+ * 以外。上一版在 [curlShape] 里**单独夹折痕端点**：下端被夹到 `−R`，上端照旧甩出去，折痕
+ * 这条线因此被掰弯 —— 「折痕穿过手指」当场破功。实测（页 1840×2800，按下 (460,1400)，
+ * 手指上移 200/400/600px）：手指仍在 x=460，折痕在手指那一行却跑到了 2211/2131/1965，
+ * 而且手指越往上、折痕越往左，读者看到的就是「折痕反向运行、手指脱离折痕」。
+ *
+ * 所以**夹倾斜、不夹端点**：倾斜收小到端点刚好不越界，折痕位置再按这个倾斜用同一个反解
+ * 重算（[creaseFoldX] / [anchoredFoldX]），「折痕穿过手指 / 纸边压在手指」这条不变量因此
+ * 原样成立。倾斜越小两端越靠近折痕中点，`lean = 0` 时两端重合在 `foldX` 上，一定不越界
+ * （手指在页内），二分收缩必定收敛。
+ *
+ * 这个上限**只跟手时用**（它要知道手指在哪）。结算没有手指，但它沿用的是松手那一刻
+ * [leanOf] 给的值（`FlipController.curlLean`），所以松手那一帧与跟手最后一帧同形，不跳。
+ *
+ * 注意它算的是 **`blend = 1` 那一帧**的折痕：起手接手那百来毫秒里折痕还从静止位置
+ * （上一页是书脊外一个筒径）滑向锚点，折痕本来就不在手指上，[curlShape] 的端点夹取会咬到
+ * ——那是过渡态，不影响「接到手指之后折痕不再离开手指」。
+ */
+private fun leanWithinPageEnds(pull: CurlPull, w: Float, h: Float, lean: Float): Float {
+    if (lean == 0f) return 0f
+    val tiltW = w * CURL_TILT_WIDTH
+    val lo = -w * CURL3D_RADIUS_RATIO
+    val hi = w * CURL_ENDPOINT_BOUND
+    fun fits(l: Float): Boolean {
+        val fold = if (pull.anchor == CurlAnchor.Crease) {
+            creaseFoldX(pull, h, l, tiltW)
+        } else {
+            anchoredFoldX(pull, w, h, l, tiltW)
+        }
+        val a = fold - l * tiltW
+        val b = fold + l * tiltW
+        return a >= lo && a <= hi && b >= lo && b <= hi
+    }
+    if (fits(lean)) return lean
+    var ok = 0f
+    var bad = 1f
+    repeat(18) {
+        val mid = (ok + bad) * 0.5f
+        if (fits(lean * mid)) ok = mid else bad = mid
+    }
+    return lean * ok
 }
 
 /**
@@ -415,10 +465,18 @@ internal fun curlShape(
 
     // 折痕与书脊：**两端一视同仁**（读者 2026-11-21 口径「你见过哪本书是翻不到书脊的？」）。
     //
-    // 书脊这一侧不压倾斜：纸角卷过书脊是翻页本来的样子。折痕端点按手指给的倾斜走，
+    // 书脊这一侧不压倾斜：纸角卷过书脊是翻页本来的样子。折痕端点按倾斜走，
     // 装订边那一侧只留纸卷**退场**的一个筒径（`−R`），自由边那一侧只受 NaN 兜底
     // （见 [CURL_ENDPOINT_BOUND]）。左半边、右半边、两个翻页方向、跟手与结算用同一套；
     // 两种锚点只在「抓的是什么」上不同（纸边压在手指 / 折痕穿过手指），这里不再有第三种分支。
+    //
+    // **这里的夹取只是兜底，不许咬到跟手帧**：单独夹端点会把折痕这条线掰弯，
+    // 「折痕穿过手指 / 纸边压在手指」当场破功（读者：「手指向上，折痕反向运行并脱离手指」）。
+    // 跟手时倾斜已由 [leanOf] 按同一条边界（`−R`）收过（见 `leanWithinPageEnds`），
+    // 所以下面的 `coerceIn` 在 `blend = 1` 的跟手帧上不生效；结算帧沿用松手那一刻的倾斜，
+    // 同样不生效。唯一会咬到的是**起手接手**那百来毫秒（`blend < 1`，折痕正从静止位置
+    // 滑向锚点）：那时折痕本来就不在手指上、还贴着书脊，形状本来就是过渡态。
+    // 另外，低层调用方直接给一个超界的 `tilt`（测试、镜像几何）时，它也起作用。
     val endpointBound = w * CURL_ENDPOINT_BOUND
     val clampLo = if (forward) -exit else -endpointBound
     val clampHi = if (forward) endpointBound else w + exit

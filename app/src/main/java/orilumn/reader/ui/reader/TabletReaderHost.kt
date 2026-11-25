@@ -366,48 +366,6 @@ class TabletReaderHost(
         }
 
     /**
-     * 修订清单的「全部恢复原文」：一次删光全书修订。
-     *
-     * 与单条删除同一口径：先记当前页首，删完整本重读修订表，**把有修订的每一章都作废**
-     * （只作废当前章会让别章的旧版式继续带着已删掉的修订内容），当前章再按改前页首重新落位。
-     */
-    override suspend fun restoreAllTextRevisions(currentPage: ReaderPos?): TextRevisionDeleteOutcome =
-        withContext(Dispatchers.IO) {
-            val all = runCatching { repository.textRevisionsForBook(bookId) }.getOrNull()
-                ?: return@withContext TextRevisionDeleteOutcome.Failed
-            if (all.isEmpty()) return@withContext TextRevisionDeleteOutcome.Success(null)
-            val ch = currentPage?.chapter
-            val anchor = ch?.let { currentPageAnchor(it, currentPage) }
-            // 当前章的改动总范围（旧渲染空间）：判「改掉的是不是只在当前页之内」要用它。
-            val ranges = if (ch != null) {
-                all.filter { it.chapter == ch }.map { controller.textRevisionRange(ch, it) }
-            } else {
-                emptyList()
-            }
-            val deleted = runCatching { repository.deleteTextRevisionsForBook(bookId) }.isSuccess
-            if (!deleted) return@withContext TextRevisionDeleteOutcome.Failed
-            controller.reloadTextRevisions()
-            revisionsSnapshot = null
-            pageNumberTick++
-            for (chapter in all.map { it.chapter }.distinct()) {
-                if (chapter != ch) controller.invalidateChapterContent(chapter)
-            }
-            val pos = if (ch != null && anchor != null) {
-                val landed = controller.reflowAfterContentChange(
-                    chapter = ch,
-                    prevPageCharStart = anchor.first,
-                    prevPageOriginalStart = anchor.second,
-                    changeOldStart = ranges.minOfOrNull { it.first } ?: 0,
-                    changeOldEndExclusive = ranges.maxOfOrNull { it.last + 1 } ?: 0,
-                ) ?: reflowFallback(ch, anchor.second)
-                landed?.let { ReaderPos(it.first, it.second, atCover = false) }
-            } else {
-                null
-            }
-            TextRevisionDeleteOutcome.Success(pos)
-        }
-
-    /**
      * 正式重排失败（解析/排版没起来）时兜底：按改前页首对应的**原书偏移**重新落位。
      *
      * 内容缓存已在 [BookDocumentController.reflowAfterContentChange] 里清掉，若就此返回 null，

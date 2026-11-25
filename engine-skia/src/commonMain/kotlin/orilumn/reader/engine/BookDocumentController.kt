@@ -557,7 +557,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
         unit.invalidateLayout()
         ensureMarkup(chapter)
         // 有修订却没能重放（没有持久化结构的章）时不许走快路径：那时树还是原文，比出来必然「没变」。
-        val revisionsApplied = unit.hasTextRevisions || (revisionMaps[chapter]?.isEmpty != false)
+        val revisionsApplied = !revisionSpaceMissing(chapter)
 
         if (canTryFast && unit.markup != null && revisionsApplied) {
             fastReflowPreservingPage(unit, bc!!, oldTable!!, oldPageIndex)?.let { return it }
@@ -1357,20 +1357,47 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     /** 本章内容版本（0 = 无修订）：宿主 / 分页表 / 页数 / 快照的失效判据。 */
     fun contentRevOf(chapter: Int): Long = chapterContentRev(chapter)
 
+    /**
+     * 本章当前**画面上的文字**是否真的带修订（修订表里有 ≠ 树里套上了）。
+     *
+     * 只差一种情况：章树已载入却是原文（结构缺失 / 重放失败，见 [replayRevisionsOnFreshStructure]）。
+     * 那时若仍按修订表换算偏移，读者会在**原文**上看到被挪过的标注 / 选区 / 书签
+     * （真机复报：改一处字，下面一串批注全部错位）。所以换算按树里真实的那份文字判：
+     *  - 树还没载入 ⇒ 按修订表（载入即套上，跳转/清单换算照常）；
+     *  - 树已载入、修订也套上了 ⇒ 按修订表；
+     *  - 树已载入、却是原文 ⇒ 恒等（书里显示什么，偏移就是什么）。
+     */
+    private fun revisionSpaceActive(chapter: Int): Boolean {
+        if (revisionMaps[chapter]?.isEmpty != false) return false
+        val unit = unitAt(chapter) ?: return false
+        return unit.markup == null || unit.hasTextRevisions
+    }
+
+    /**
+     * 本章有修订却没重放上（树是原文）：此刻排出来的字符偏移是**原文**的，任何按内容版本
+     * 落盘的产物（分页表 / 页快照）都不许写 —— 写了就把旧文字的分页钉在新版本号上，
+     * 下次开书（结构就绪、修订套上了）会按它取页，文字与页界整体错位。
+     */
+    private fun revisionSpaceMissing(chapter: Int): Boolean =
+        revisionMaps[chapter]?.isEmpty == false && !revisionSpaceActive(chapter)
+
     /** 原书偏移 → 渲染偏移（无修订时原样返回；审阅视图下换到审阅空间）。 */
     fun renderedOffset(chapter: Int, original: Int): Int {
+        if (!revisionSpaceActive(chapter)) return original
         val map = revisionMaps[chapter] ?: return original
         return if (reviewMode) map.toReview(original) else map.toRendered(original)
     }
 
     /** 渲染偏移 → 原书偏移（无修订时原样返回；审阅视图下从审阅空间换算）。 */
     fun originalOffset(chapter: Int, rendered: Int): Int {
+        if (!revisionSpaceActive(chapter)) return rendered
         val map = revisionMaps[chapter] ?: return rendered
         return if (reviewMode) map.toOriginalFromReview(rendered) else map.toOriginal(rendered)
     }
 
     /** 原书区间 → 渲染区间（无修订时原样返回；审阅视图下换到审阅空间）。 */
     fun renderedRange(chapter: Int, start: Int, endExclusive: Int): IntRange {
+        if (!revisionSpaceActive(chapter)) return start until endExclusive
         val map = revisionMaps[chapter] ?: return start until endExclusive
         if (!reviewMode) return map.toRenderedRange(start, endExclusive)
         val s = map.toReview(start, crossInsertions = true)
@@ -1380,6 +1407,7 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
 
     /** 渲染区间 → 原书区间（无修订时原样返回；审阅视图下从审阅空间换算）。 */
     fun originalRange(chapter: Int, start: Int, endExclusive: Int): IntRange {
+        if (!revisionSpaceActive(chapter)) return start until endExclusive
         val map = revisionMaps[chapter] ?: return start until endExclusive
         if (!reviewMode) return map.toOriginalRange(start, endExclusive)
         val s = map.toOriginalFromReview(start)
@@ -2218,13 +2246,52 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
     private fun readChapterInto(unit: ChapterUnit, index: Int) {
         val tree = readChapter(index)
         if (tree != null) {
-            if (revisionMaps[unit.chapterIndex]?.isEmpty == false) {
-                // 无持久化结构（含视口媒体查询的章 / 导入未覆盖）：重放需要结构里的叶表，
-                // 本路径拿不到，只能先按原文显示。改动仍留在库里，等结构落盘后生效。
-                Logger.w(logTag, "revision: ch=$index has no persisted structure, revisions skipped")
-            }
-            unit.ensureMarkup(tree, chapterTitle(tree))
+            // 有修订却没能从持久化结构载入（首次导入 / 改过版心后的媒体章）：结构里的叶表
+            // 是重放的前提，缺了就只能按原文排。这里当场把结构算出来（排版本来也要付这一笔，
+            // 顺手落盘供下次冷开书直接复用）再重放，别让读者看着「改的字没变」。
+            val revised = replayRevisionsOnFreshStructure(unit, tree)
+            unit.ensureMarkup(revised, chapterTitle(revised))
         }
+    }
+
+    /**
+     * 缺持久化结构时的修订重放（[readChapterInto] 用）：先用**原文**算一遍结构并落盘，
+     * 再在同一棵树的内存副本上重放本章修订。
+     *
+     * 为什么不能「先按原文显示、等下次开书再说」：修订表一旦载入，宿主给阅读面的标注 / 选区 /
+     * 书签全按修订表换算（[renderedOffset] 等）。正文还是原文、换算却按修订走，读者会看到
+     * 「改的字没变，下面一串批注全部错位」（真机复报）。所以要么正文真的带上修订，要么换算
+     * 全身而退（见 [revisionSpaceActive]）—— 两件事这里一起做。
+     *
+     * 结构落盘的是**原文**那份（重放只改内存副本，见 [applyTextRevisions]），随后
+     * `saveUnitStructure` 因 `hasTextRevisions` 跳过，磁盘上的树与结构永远对得上。
+     *
+     * 算不出结构（版心未知 / 无排版器 / 结构为空）就原样返回原文，并把
+     * [ChapterUnit.revisionReplayTried] 记上，免得每次载入都为它白算一遍。
+     */
+    private fun replayRevisionsOnFreshStructure(unit: ChapterUnit, tree: MarkupElement): MarkupElement {
+        if (revisionMaps[unit.chapterIndex]?.isEmpty != false) return tree
+        if (unit.revisionReplayTried) return tree
+        val bc = layouter as? BoxChapterLayouter ?: return tree
+        val bundle = unit.cssBundle ?: return tree
+        if (viewW <= 0 || viewH <= 0) return tree
+        val contentW = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
+        val contentH = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
+        unit.revisionReplayTried = true
+        val t0 = platformNowMs()
+        val blocks = runCatching {
+            bc.prepareLight(tree, bundle, profile, contentW, unit.structureCache, contentH).totalBlocks
+        }.getOrElse {
+            Logger.w(logTag, "revision: ch=${unit.chapterIndex} structure build FAILED ${it::class.simpleName}")
+            0
+        }
+        if (blocks <= 0) return tree
+        // 结构已算好（原文那份）：落盘让下次冷开书直接「载入结构 + 重放」，不再走这条补救路径。
+        persistUnitStructure(unit, tree, ChapterStructureCodec.cssHashOf(bundle.cssTexts), contentW, contentH)
+        val revised = applyTextRevisions(unit, tree)
+        Logger.w(logTag, "revision: ch=${unit.chapterIndex} replayed on freshly computed structure " +
+            "applied=${unit.hasTextRevisions} t=${platformNowMs() - t0}ms")
+        return revised
     }
 
     /**
@@ -3050,13 +3117,35 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             Logger.w(logTag, "structure save SKIP ch=${unit.chapterIndex} (has text revisions)")
             return
         }
-        val store = structureStore() ?: return
         val tree = unit.markup ?: return
+        persistUnitStructure(unit, tree, cssHash, contentW, contentH)
+    }
+
+    /** The actual write behind [saveUnitStructure]; [tree] is the **original** tree (never the
+     *  revision-replayed copy). Also used when the structure was just computed ahead of the chapter's
+     *  markup being bound (see `replayRevisionsOnFreshStructure`). */
+    private fun persistUnitStructure(
+        unit: ChapterUnit,
+        tree: MarkupElement,
+        cssHash: Long,
+        contentW: Int,
+        contentH: Int,
+    ) {
+        if (bookId < 0) return
+        val store = structureStore() ?: return
         val bundle = unit.cssBundle ?: return
         if (ChapterStructureCodec.cssHashOf(bundle.cssTexts) != cssHash) return
         val viewportKey = ChapterStructurePersist.viewportKeyOf(contentW, contentH)
         val ok = runCatching {
-            ImportStructures.persistChapter(store, "book_$bookId", unit.chapterIndex, tree, bundle, unit.structureCache, viewportKey = viewportKey)
+            ImportStructures.persistChapter(
+                store,
+                "book_$bookId",
+                unit.chapterIndex,
+                tree,
+                bundle,
+                unit.structureCache,
+                viewportKey = viewportKey,
+            )
         }.onFailure {
             Logger.w(logTag, "structure save FAILED ch=${unit.chapterIndex}: ${it::class.simpleName}: ${it.message}")
         }.getOrDefault(false)
@@ -3205,6 +3294,8 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
             delay(PAGE_SNAPSHOT_DEBOUNCE_MS)
             val unit = unitAt(chapter) ?: return@launch
             if (viewW <= 0 || viewH <= 0) return@launch
+            // 修订没重放上（树还是原文）：这一页的字符偏移与行几何都是原文的，落快照等于把错页钉住。
+            if (revisionSpaceMissing(chapter)) return@launch
             val contentWidth = (viewW - profile.marginLeft - profile.marginRight).coerceAtLeast(16)
             val contentHeight = (viewH - profile.marginTop - profile.marginBottom).coerceAtLeast(16)
             val snap = layoutMutex.withLock { capturePageSnapshot(unit, charStart, contentWidth, contentHeight) }
@@ -3609,7 +3700,10 @@ fun backwardEntryAnchorChar(unit: ChapterUnit, markup: MarkupElement): Int =
                 if (slices.isEmpty()) noteZeroPageChapter(unit.chapterIndex, paramHash)
 
                 // Persist pagination table (with block ranges backfilled by BoxChapterLayouter).
-                if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
+                // 修订没重放上（树还是原文）时不许落表：这份页界是按原文排的，见 revisionSpaceMissing。
+                if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0 &&
+                    !revisionSpaceMissing(unit.chapterIndex)
+                ) {
                     val totalChars = slices.last().charEnd
                     val table = ChapterPaginationTable.fromSlices(
                         chapterIndex = unit.chapterIndex,
@@ -5732,7 +5826,9 @@ private fun finishCanonicalBackground(
     val cacheFile = if (cache != null && bookId >= 0) {
         cache.file("book_$bookId", unit.chapterIndex, paramHash, rev)
     } else null
-    if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
+    if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0 &&
+        !revisionSpaceMissing(unit.chapterIndex)
+    ) {
         val totalChars = slices.last().charEnd
         val table = ChapterPaginationTable.fromSlices(
             chapterIndex = unit.chapterIndex,
@@ -5966,6 +6062,11 @@ private fun finishCanonicalBackground(
         }
         val cache = cacheStore() ?: return
         if (bookId < 0) return
+        // 修订没重放上（树还是原文）：页界按原文排的，不许落表（见 revisionSpaceMissing）。
+        if (revisionSpaceMissing(unit.chapterIndex)) {
+            Logger.w(logTag, "small-table write skipped (revision space missing) ch=${unit.chapterIndex}")
+            return
+        }
         val file = cache.file("book_$bookId", unit.chapterIndex, paramHash, table.contentRev)
         runCatching { cache.write(table, file) }
             .onFailure { Logger.e(logTag, "small-table write FAIL ch=${unit.chapterIndex} ${it.message}") }
@@ -6339,7 +6440,7 @@ private fun finishCanonicalBackground(
             val diskPages = runCatching {
                 cacheStore()?.readPageCount("book_$bookId", index, paramHash, chapterContentRev(index))
             }.getOrNull()
-            if (diskPages == null) {
+            if (diskPages == null && !revisionSpaceMissing(index)) {
                 val cache = cacheStore()
                 if (cache != null && bookId >= 0) {
                     val file = cache.file("book_$bookId", index, paramHash, table.contentRev)
@@ -6649,7 +6750,9 @@ private fun finishCanonicalBackground(
         val cacheFile = if (cache != null && bookId >= 0) {
             cache.file("book_$bookId", unit.chapterIndex, paramHash, rev)
         } else null
-        if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0) {
+        if (cache != null && cacheFile != null && slices.isNotEmpty() && slices[0].blockStart >= 0 &&
+            !revisionSpaceMissing(unit.chapterIndex)
+        ) {
             val table = ChapterPaginationTable.fromSlices(
                 chapterIndex = unit.chapterIndex,
                 paramHash = paramHash,

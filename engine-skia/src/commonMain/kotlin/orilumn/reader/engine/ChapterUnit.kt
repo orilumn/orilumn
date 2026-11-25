@@ -49,6 +49,16 @@ class ChapterUnit(
      */
     var hasTextRevisions: Boolean = false
 
+    /**
+     * 本章试过「缺结构时当场补算结构再重放修订」没有
+     * （见 `BookDocumentController.replayRevisionsOnFreshStructure`）。
+     *
+     * 载入时没有可用结构（首次导入 / 改过版心后的媒体章）的章，重放要临时算一遍结构——
+     * 这一步排版本来也要付，但真算不出（无版心 / 结构不成立）时不该每次载入都为它白算，
+     * 所以记一笔。[evictParsedState] 会把标记清掉：内容重载后值得再试一次。
+     */
+    var revisionReplayTried: Boolean = false
+
     /** Chapter name (taken from the first paragraph/title text, for log locating); empty when
      * markup isn't loaded. */
     var title: String = ""
@@ -304,6 +314,7 @@ class ChapterUnit(
         shapedPageTo = -1
         laidOut = false
         hasTextRevisions = false
+        revisionReplayTried = false
         structureCache.reset()
     }
 }

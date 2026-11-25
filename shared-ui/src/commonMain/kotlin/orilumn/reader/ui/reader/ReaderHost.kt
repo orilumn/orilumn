@@ -293,16 +293,6 @@ interface ReaderHost {
     ): TextRevisionDeleteOutcome = TextRevisionDeleteOutcome.Failed
 
     /**
-     * 修订清单的「全部恢复原文」：把全书修订一次删光，返回结果（口径同 [deleteTextRevision]）。
-     *
-     * 删的是当前阅读章时，[TextRevisionDeleteOutcome.Success.pos] 给出按「删除前页首」重新落位的
-     * 新位置；别的章只作废版式，当前页不动（那时 pos 为 null）。
-     * 默认失败 = 宿主尚未支持。
-     */
-    suspend fun restoreAllTextRevisions(currentPage: ReaderPos? = null): TextRevisionDeleteOutcome =
-        TextRevisionDeleteOutcome.Failed
-
-    /**
      * 审阅视图开关：打开后本章按「原文全保留 + 新文字插在后面」重排，改动的痕迹看得见
      * （删掉的字变红划红线、新添的字变绿）。返回 true 表示真的变了，调用方必须重排并重新落位。
      *

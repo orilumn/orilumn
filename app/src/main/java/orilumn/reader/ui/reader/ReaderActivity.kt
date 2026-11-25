@@ -509,20 +509,6 @@ class ReaderActivity : ComponentActivity() {
                         load = { tabletHost?.textRevisionsForBook() },
                         // 开书后台预读的快照：抽屉第一帧就有清单，不再「先空白后填充」。
                         initial = tabletHost?.cachedTextRevisions(),
-                        onRestoreAll = {
-                            when (val outcome = tabletHost?.restoreAllTextRevisions(currentPos)) {
-                                is TextRevisionDeleteOutcome.Success -> {
-                                    relayoutAnchor.release()
-                                    layoutRevision++
-                                    outcome.pos?.let { target ->
-                                        currentPos = target
-                                        pushExternalPos(target)
-                                    }
-                                    true
-                                }
-                                else -> false
-                            }
-                        },
                         onDelete = { revision ->
                             when (val outcome = tabletHost?.deleteTextRevision(revision, currentPos)) {
                                 is TextRevisionDeleteOutcome.Success -> {

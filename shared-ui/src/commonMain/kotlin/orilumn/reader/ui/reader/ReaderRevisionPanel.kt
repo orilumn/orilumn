@@ -4,10 +4,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -71,8 +69,6 @@ fun ReaderRevisionPanel(
     onDismiss: () -> Unit,
     /** 宿主缓存的整本修订快照：给了就**首帧**直接排列表，抽屉不会先滑出半屏空白。 */
     initial: List<TextRevision>? = null,
-    /** 「全部恢复原文」：成功返回 true。null = 宿主不支持，按钮不出现。 */
-    onRestoreAll: (suspend () -> Boolean)? = null,
     /**
      * 一条修订在**审阅空间**里的样子（宿主口，与正文审阅视图同一份数据）。
      *
@@ -88,8 +84,6 @@ fun ReaderRevisionPanel(
     var loadFailed by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var reloadTick by remember { mutableStateOf(0) }
-    // 「全部恢复」是破坏性操作：点一下只展开确认条，再点「恢复」才真删。
-    var confirmRestoreAll by remember { mutableStateOf(false) }
     // 左滑展开的行键：同时只展开一行（SwipeRevealRow 的手势物理与它共用一套口径）。
     var openKey by remember { mutableStateOf<String?>(null) }
     val currentLoad by rememberUpdatedState(load)
@@ -166,33 +160,6 @@ fun ReaderRevisionPanel(
         }
     }
 
-    /**
-     * 全部恢复原文：宿主一次删光并重排，清单随即清空。失败保留列表、就地提示。
-     * 删完把焦点还给列表体（此时是空态，↑↓ 不再动作，Esc 照旧可关）。
-     */
-    fun restoreAll() {
-        val action = onRestoreAll ?: return
-        error = null
-        confirmRestoreAll = false
-        scope.launch {
-            val ok = try {
-                action()
-            } catch (c: CancellationException) {
-                throw c
-            } catch (_: Throwable) {
-                false
-            }
-            if (ok) {
-                loaded = emptyList()
-                nav.activeIdx = null
-                openKey = null
-                error = null
-            } else {
-                error = "恢复失败"
-            }
-        }
-    }
-
     // 打开时把高亮落到当前阅读章的第一条修改（滚动位置已由初始下标就位，与笔记清单同口径）。
     LaunchedEffect(loaded) {
         if (loaded == null || positioned) return@LaunchedEffect
@@ -216,31 +183,6 @@ fun ReaderRevisionPanel(
             // 点按消费：杂散点按不穿透到遮罩关闭层。
             .pointerInput(Unit) { detectTapGestures(onTap = {}) },
     ) {
-        // 「全部恢复」只在真有修改、且宿主支持时出现；破坏性操作先展开确认条。
-        if (onRestoreAll != null && all.isNotEmpty() && !confirmRestoreAll) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(start = 12.dp, end = 12.dp, top = 8.dp, bottom = 4.dp),
-                horizontalArrangement = Arrangement.End,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "全部恢复",
-                    color = PanelGold,
-                    fontSize = 13.sp,
-                    modifier = Modifier.clickable { confirmRestoreAll = true },
-                )
-            }
-        }
-        if (confirmRestoreAll) {
-            RevisionRestoreAllConfirm(
-                palette = p,
-                count = all.size,
-                onConfirm = ::restoreAll,
-                onCancel = { confirmRestoreAll = false },
-            )
-        }
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             when {
                 loadFailed && loaded == null -> Column(modifier = Modifier.padding(24.dp)) {
@@ -304,42 +246,6 @@ fun ReaderRevisionPanel(
                 )
             }
         }
-    }
-}
-
-/** 「全部恢复」的确认条：破坏性操作不给一键误触的机会。 */
-@Composable
-private fun RevisionRestoreAllConfirm(
-    palette: Palette,
-    count: Int,
-    onConfirm: () -> Unit,
-    onCancel: () -> Unit,
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(palette.rowActive)
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            "把 $count 条修改全部恢复成原文？",
-            color = palette.text,
-            fontSize = 13.sp,
-            modifier = Modifier.weight(1f),
-        )
-        Text(
-            "恢复",
-            color = Color(REVIEW_DELETED_ARGB),
-            fontSize = 13.sp,
-            modifier = Modifier.padding(start = 12.dp).clickable(onClick = onConfirm),
-        )
-        Text(
-            "取消",
-            color = palette.muted,
-            fontSize = 13.sp,
-            modifier = Modifier.padding(start = 12.dp).clickable(onClick = onCancel),
-        )
     }
 }
 

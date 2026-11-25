@@ -406,46 +406,6 @@ class DesktopReaderHost(
         }
 
     /**
-     * 修订清单的「全部恢复原文」：一次删光全书修订。
-     *
-     * 与单条删除同一口径：先记当前页首，删完整本重读修订表，**把有修订的每一章都作废**，
-     * 当前章再按改前页首重新落位。
-     */
-    override suspend fun restoreAllTextRevisions(currentPage: ReaderPos?): TextRevisionDeleteOutcome =
-        withContext(Dispatchers.Default) {
-            val all = runCatching { store.textRevisionsForBook(bookId) }.getOrNull()
-                ?: return@withContext TextRevisionDeleteOutcome.Failed
-            if (all.isEmpty()) return@withContext TextRevisionDeleteOutcome.Success(null)
-            val ch = currentPage?.chapter
-            val anchor = ch?.let { currentPageAnchor(it, currentPage) }
-            val ranges = if (ch != null) {
-                all.filter { it.chapter == ch }.map { controller.textRevisionRange(ch, it) }
-            } else {
-                emptyList()
-            }
-            val deleted = runCatching { store.deleteTextRevisionsForBook(bookId) }.isSuccess
-            if (!deleted) return@withContext TextRevisionDeleteOutcome.Failed
-            controller.reloadTextRevisions()
-            pageNumberTick++
-            for (chapter in all.map { it.chapter }.distinct()) {
-                if (chapter != ch) controller.invalidateChapterContent(chapter)
-            }
-            val pos = if (ch != null && anchor != null) {
-                val landed = controller.reflowAfterContentChange(
-                    chapter = ch,
-                    prevPageCharStart = anchor.first,
-                    prevPageOriginalStart = anchor.second,
-                    changeOldStart = ranges.minOfOrNull { it.first } ?: 0,
-                    changeOldEndExclusive = ranges.maxOfOrNull { it.last + 1 } ?: 0,
-                ) ?: reflowFallback(ch, anchor.second)
-                landed?.let { ReaderPos(it.first, it.second, atCover = false) }
-            } else {
-                null
-            }
-            TextRevisionDeleteOutcome.Success(pos)
-        }
-
-    /**
      * 正式重排失败（解析/排版没起来）时兜底：按改前页首对应的**原书偏移**重新落位。
      * 内容缓存已被重排清掉，若就此返回 null，阅读面会拿着没有版式的旧页去画——整页空白且不自愈。
      */

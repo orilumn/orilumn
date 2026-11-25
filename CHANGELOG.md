@@ -7,11 +7,10 @@
 > 本 CHANGELOG 自 **0.4.3** 起记录：0.4.2 及更早的版本没有条目，需要追溯请查 git 提交历史。
 > 内部重构与文档修订也要记（测试不计）；条目一律用**自然语言**说明，不堆砌内部标识符（类名、函数名、常量名、日志字段等）。
 
-## 未发布
+## [0.5.12] - 2026-11-25
 
 - 新增 Arch / EndeavourOS 用的 pacman 安装包，构建时会在容器里真装一遍确认能装上，装完应用菜单里有入口。
-
-- 说明文档的下载表补上了 Linux 的 rpm 包入口（Fedora / openSUSE 一类发行版），并写清每种 Linux 发行版该装哪种包。
+- 说明文档的下载表按发行版重新归类：Windows 提到前面，Linux 分成 Debian / Ubuntu、Arch / EndeavourOS、Fedora / openSUSE，另留一行通用包，Fedora / openSUSE 用的 rpm 包也有了入口。
 
 ## [0.5.11] - 2026-11-25
 

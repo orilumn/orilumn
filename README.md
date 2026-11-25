@@ -75,7 +75,7 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 | Windows | `Orilumn-<版本>-windows-x64.msi` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-windows-x64.msi) |
 | macOS Intel | `Orilumn-<版本>-macos-x64.dmg` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-macos-x64.dmg) |
 | Linux · Debian / Ubuntu | `Orilumn-<版本>-linux-x64.deb` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.deb) |
-| Linux · Arch / EndeavourOS | `Orilumn-<版本>-linux-x64.pkg.tar.zst` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.pkg.tar.zst) |
+| Linux · Arch / EndeavourOS | `Orilumn-<版本>-linux-x64.pkg.tar.zst` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.pkg.tar.zst) |
 | Linux · Fedora / openSUSE | `Orilumn-<版本>-linux-x64.rpm` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.rpm) |
 | macOS Apple Silicon | `Orilumn-<版本>-macos-arm64.dmg` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-macos-arm64.dmg) |
 | 其他 Linux 发行版 / 桌面环境 | `Orilumn-<版本>-linux-x64.AppImage` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.AppImage) |

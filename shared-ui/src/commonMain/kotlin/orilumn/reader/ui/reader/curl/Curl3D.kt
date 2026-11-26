@@ -1,7 +1,6 @@
 package orilumn.reader.ui.reader.curl
 
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.BlendMode
 import androidx.compose.ui.graphics.Brush
@@ -15,6 +14,7 @@ import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathFillType
 import androidx.compose.ui.graphics.Shader
+import androidx.compose.ui.graphics.ShaderBrush
 import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.Vertices
 import androidx.compose.ui.graphics.VertexMode
@@ -168,7 +168,9 @@ internal fun DrawScope.drawCurl3DFrame(
         return true
     }
 
-    // ① 正面页（被翻走的那一页，整页铺在底下）② 露出页（折痕另一侧的新页）
+    // ① 底图：**只给露出页那条 1px 收边垫底**。被翻走的那一张现在由 ⑥ 的三角带整页画出
+    //    （见 [buildCurlMesh]：平铺半页与卷筒是同一条带子，折痕是内部扫线）；这里再整页铺
+    //    一遍只是为了让露出页收进来的那 1px 有东西垫着，不然会露出背景。
     drawPage(front, paper, frontTex.x, frontTex.y, pageSize)
     val corners = revealCorners(shape)
     if (corners.size < 3) return true
@@ -182,13 +184,12 @@ internal fun DrawScope.drawCurl3DFrame(
 
     // ③ 网格几何
     //
-    // 整张纸只贴**一张不透明贴图**：有覆盖层（旁注 + 页码）时先把页栅格与覆盖层合成一张
+    // 整张纸只贴**一张不透明整页贴图**：页栅格、纸色与覆盖层（旁注 + 页码）先合成一张
     // 整页图（见 [CurlPageBake]）。分两遍画不行：覆盖层是透明底的，网格那条路径会把它的
     // 透明像素抬成白色，卷起来的纸整个刷白、只剩旁注 —— 读者报的「反面没有文字，只有批注」。
     //
-    // 贴图先取（下面 ⑥ 才用它画），因为**版心的两条竖边要当扫线补进网格**
-    //（见 [buildCurlMesh] 的 `materialRect`）：页栅格只有版心那么大，它的边与扫线平行时
-    // 不补这一行，版心与页边距之间就会漏出一条缝。
+    // 贴图先取（下面 ⑥ 才用它画）：网格贴的就是这张整页图，整张纸因此只有一种材料，
+    // 不需要为「版心 | 页边距」那条边补扫线。
     val sheet = front.bake.textureOf(
         images = front,
         pageW = w,
@@ -202,14 +203,6 @@ internal fun DrawScope.drawCurl3DFrame(
         shape = shape,
         radius = radius,
         splits = CURL3D_SPLITS,
-        materialRect = sheet?.let {
-            Rect(
-                left = it.texLeft,
-                top = it.texTop,
-                right = it.texLeft + it.texture.image.width,
-                bottom = it.texTop + it.texture.image.height,
-            )
-        },
     )
     if (mesh.indexCount == 0) return false
 
@@ -269,90 +262,86 @@ internal fun DrawScope.drawCurl3DFrame(
     // 这只是影**结束**的地方，跟影什么时候开始画（下面的 `ramp`）无关，`ramp` 一字未改。
     val taperFrom = mesh.firstRowAtArc(flatTurn * 0.5f)
 
-    // ⑥ 各段网格：纹理 → 纸背压淡 → 纸卷明暗
+    // ⑥ 整张纸：**一条纹理带铺满整张纸 → 纸背压淡 → 整张纸明暗**（没有贴图时才垫纸色）
+    //
+    // 贴图现在是**整页**（页栅格 + 纸色 + 覆盖层烤成一张不透明图，见 `CurlPageBake`），
+    // 整张纸只有一种材料。参考实现 `Mesh3D.drawiBook` 是一条连续的三角带：正面那趟画到
+    // 「筒顶」那一行，纸背那趟从 `max(0, mVerticesCountFront - 2)` 起画，共用那一行由后画的
+    // 整行盖住。它之所以分两趟，是要给纸背单独压一层 0.9 的纸色；我们那层压淡是另一条路径，
+    // 所以纹理**一趟铺满整张纸**：正反面贴的是同一张整页图（纸背的字由几何自己镜像），
+    // 中间没有任何段界，也就不存在「两条半覆盖边相叠」的缝。
+    //
+    // 以前纹理只铺版心、页边距靠纸色补，材料边两侧各画一次，交界那一列必然拿到
+    // 「半列纸色 + 半列纹理」—— 那条边已经随整页贴图去掉了。
+    //
+    // 但「整页贴图」只解决了材料分层：**平铺半页仍然是另一次 drawPage**，网格从折痕那一行起。
+    // 折痕于是成了两次绘制的交界，两个方向各自抗锯齿，正面与卷筒之间留下一条 1px 接缝
+    // （GPU 光栅化特有，CPU/Skia 复现不出来）。现在 [buildCurlMesh] 把平铺半页也放进同一条
+    // 三角带，折痕是带子的内部扫线 —— 与两个参考实现一致，交界本身不存在了。
     val canvas = drawContext.canvas
-    // 纸卷绕过半圈之后，纸背（Verso）盖在正面（Recto）上，但两段的屏幕范围是「整条 ÷ 最左一截」：
-    // 明暗沿法向只跟 q 有关，所以叠在**整条**（Recto）上算一次就够，只有没有 Recto 时才用 Verso。
-    // 明暗只画在**看得见**的那一面：纸卷隆起后外层是纸背（Verso，z ≥ R，压在正面那半圈之上），
-    // 没绕到九十度时只有正面（Recto）露在外面。给被压住的那一段画明暗等于白画。
-    val hasVerso = mesh.bands.any { it.surface == CurlMesh.Surface.Verso }
     // 纸边被卷起来时可以略微探出页面（斜折痕 + 抬起的纸），画布裁到页面内即可。
     clipRect(0f, 0f, w, h) {
-        fun drawBand(band: CurlMesh.Band) {
-            if (band.indexCount <= 0) return
-            val ring = mesh.bandOutline(band)
-            if (ring.size < 3) return
-            val outline = polygonPath(ring)
-            val pageTexture = sheet?.texture
-            val pageImage = pageTexture?.image
-            // 烤图是整页，页栅格是版心：贴图偏移与材料范围都跟着 [sheet] 走。
-            val texLeft = sheet?.texLeft ?: 0f
-            val texTop = sheet?.texTop ?: 0f
-            val texWidth = pageImage?.width?.toFloat() ?: 0f
-            val texHeight = pageImage?.height?.toFloat() ?: 0f
-            // 纹理**只能画在版心材料范围内**：页栅格只有版心那么大（平板 1585×2400 放在
-            // 1840×2800 里），页边距里根本没有像素（封面与覆盖层烤图是整页，材料范围就是整页）。
-            // **不再用 `clipPath` 按材料形状裁**：折痕一斜，那条裁剪路径就不是矩形，
-            // 抗锯齿裁切会让 Skia 为它开一张全页大小的图层，平板上实测一帧多三十来毫秒
-            //（手指横划时倾斜不为零，帧率当场掉到 20fps；直线滑动倾斜恒 0 反而 60fps）。
-            // 纹理裁在**几何**里（见 [textureStrip]），不画布裁切。
-            val strip = if (pageImage == null) {
-                null
-            } else {
-                mesh.textureStrip(
-                    band = band,
-                    texLeft = texLeft,
-                    texTop = texTop,
-                    texWidth = texWidth,
-                    texHeight = texHeight,
-                )
-            }
-            // 纸的每一段都是**不透明的一张纸**：先给这一段垫纸色 —— 但**只垫在版心之外**
-            //（页边距里没有像素，那一段必须露出纸色），版心那一块由纹理自己铺满。
-            // 两处都垫的话，纹理的抗锯齿边压在纸色上，交界那一列像素拿到「半列纸色 +
-            // 半列纹理」，比两边都亮 —— 读者报的「卷筒与纸正面交界处一条多余的接缝线」
-            //（反面同一条）就是它；段与段共用的那行扫线同理。
-            if (pageImage == null) {
-                drawPath(outline, paper)
-            } else {
-                for (margin in mesh.marginStrips(band, texLeft, texTop, texWidth, texHeight)) {
-                    drawPath(polygonPath(margin.outlinePath()), paper)
-                }
-            }
-            if (strip != null) {
-                drawTextureStrip(
-                    canvas = canvas,
-                    strip = strip,
-                    paint = front.textures.pagePaint(pageTexture!!),
-                )
-            }
+        val pageTexture = sheet?.texture
+        val pageImage = pageTexture?.image
+        // 烤图恒为整页，偏移 (0,0)；仍按 [sheet] 取一遍，将来换回版心贴图也不会错位。
+        val texLeft = sheet?.texLeft ?: 0f
+        val texTop = sheet?.texTop ?: 0f
+        val texWidth = pageImage?.width?.toFloat() ?: 0f
+        val texHeight = pageImage?.height?.toFloat() ?: 0f
 
-            // 纸背：纸色只盖一成 ⇒ 内容仍留九成（参考实现 `BACKFACE_ALPHA = 0.9`）。
-            // 只压在**版心那一块**上：页边距本来就是纸色，再压一层只会让这层纸色的抗锯齿边
-            // 压在纹理上（与纸底同一个道理），交界处多一条比两边都亮的细线。
-            if (band.surface != CurlMesh.Surface.Recto) {
-                if (strip == null) {
-                    drawPath(outline, paper, alpha = CURL_BACK_WASH_ALPHA)
-                } else {
-                    drawPath(polygonPath(strip.outlinePath()), paper, alpha = CURL_BACK_WASH_ALPHA)
-                }
-            }
-            // 纸背**不描边、不压暗**：它的边是纸自己的边，画成实线就成了读者说的
-            // 「卷筒左侧那条与折痕平行的痕迹」。纸背只留自己的镜像内容 + 一层纸色压淡。
-            val topmost = when (band.surface) {
-                // 正面那半圈被外层（纸背）压住时不用画；只露正面时才是它。
-                CurlMesh.Surface.Recto -> !hasVerso
-                else -> true
-            }
-            if (CURL3D_SHADING && topmost) {
-                // 筒身只有「反光」这一层明暗（往白里压），不给整段压暗：暗面已退役。
-                drawBandShade(outline, mesh, band, radius, t0, up)
-            }
+        val lastRow = mesh.bands.last().lastRow
+        val sheetOutline = polygonPath(mesh.bandOutline(0, lastRow))
+
+        // 纹理裁在**几何**里（见 [textureStrip]），不画布裁切：折痕一斜，按材料形状裁出来的
+        // 路径就不是矩形，抗锯齿裁切会让 Skia 为它开一张全页大小的图层（平板上一帧多三十来毫秒）。
+        val strip = pageImage?.let {
+            mesh.textureStrip(0, lastRow, texLeft, texTop, texWidth, texHeight)
         }
-        // ⑥ 画序 = 各段网格（Recto → Verso → Back）→ 纸边落影。
-        // 影只铺页边**朝外**那一侧（背离纸背），所以落在纸背上的那半条根本不存在；
-        // 画在所有纸段之后，卷起来那一段的影才不会被卷筒盖掉（读者判「阴影被卷筒截断」）。
-        for (band in mesh.bands) drawBand(band)
+        // 纸色垫底**只在没有纹理时**：整页图是不透明的，贴图自己就是整张纸。
+        //
+        // 有贴图还垫一层，贴图的抗锯齿边就压在纸色上，折痕那一列拿到「半列纸色 + 半列纹理」，
+        // 比两侧都亮 —— 就是读者报的「卷筒与纸正面交界处一条接缝线」本身。测试
+        // `foldHasNoPaperSeamLine` 量到过：折痕列 0.503、两侧 0.125。
+        if (strip == null) {
+            drawPath(sheetOutline, paper)
+        } else {
+            drawTextureStrip(
+                canvas = canvas,
+                strip = strip,
+                paint = front.textures.pagePaint(pageTexture!!),
+            )
+        }
+
+        // 纸背压淡：纸背内容留九成（参考实现 `BACKFACE_ALPHA = 0.9`）。从筒顶渐入
+        // （见 [CURL_BACK_WASH_RAMP]）：界上浓度为零，这条路径的抗锯齿边不会把纸色混进
+        // 正面内容、在筒顶留一条比两侧都亮的细线。
+        val backRows = mesh.backFaceRows()
+        if (backRows != null) {
+            val washStart = t0 + up * radius
+            drawHardEdgePath(
+                polygonPath(mesh.bandOutline(backRows.first, backRows.last)),
+                Brush.linearGradient(
+                    colorStops = arrayOf(
+                        0f to paper.copy(alpha = 0f),
+                        1f to paper.copy(alpha = CURL_BACK_WASH_ALPHA),
+                    ),
+                    start = washStart,
+                    end = washStart - up * (radius * CURL_BACK_WASH_RAMP),
+                ),
+            )
+        }
+
+        // 明暗：**整张纸一条路径、一条渐变**（参考实现是逐顶点色，沿整条带连续取值）。
+        // 只给「看得见的那一面」画，会在筒顶那条界上留下一道亮线：正面那半圈一点不压亮、
+        // 纸背那半圈一上来就是最亮。整张纸一起取 `shadeAlpha(q)`，q 是屏幕偏移、两面同值。
+        //
+        // 渐变从**折痕那一行**起算（不是整条带子的第 0 行）：折痕之前是还没掀起的半页，
+        // `q < 0` 一律零浓度。从第 0 行起算会把整页的宽度都算进停止点，卷筒那一段只分到
+        // 几个停止点，明暗出现可见的色阶。
+        if (CURL3D_SHADING) {
+            val shadeFrom = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Recto }?.firstRow ?: 0
+            drawSheetShade(sheetOutline, mesh, shadeFrom, lastRow, radius, t0, up)
+        }
         // 起点 = **纸背刚露头**：网格里已经有了 `Verso`（纸卷外圈那半段，纸背朝上）就画，
         // 不必等平铺段。定朝外仍然优先用平铺段的扫线行，还没有平铺段时退回用 `Verso` 那半段。
         //
@@ -816,18 +805,23 @@ private fun DrawScope.drawCornerFan(
 }
 
 /**
- * 某一段的明暗：沿 `up` 方向的一条渐变，取值照参考实现的顶点色公式。 */
-private fun DrawScope.drawBandShade(
+ * 整张纸的明暗：沿 `up` 方向的一条渐变，取值照参考实现的顶点色公式。
+ *
+ * 一次画满 `firstRow..lastRow`（生产上就是整张纸）：明暗只跟屏幕偏移 `q` 有关，两面同值，
+ * 所以一整条渐变本身就是连续的；分成两段画时，正面那半圈不压亮、纸背那半圈压到最亮，
+ * 筒顶那条段界上就是一道亮线。 */
+private fun DrawScope.drawSheetShade(
     outline: Path,
     mesh: CurlMesh,
-    band: CurlMesh.Band,
+    firstRow: Int,
+    lastRow: Int,
     radius: Float,
     origin: Offset,
     up: Offset,
 ) {
     var u0 = Float.MAX_VALUE
     var u1 = -Float.MAX_VALUE
-    for (row in band.firstRow..band.lastRow) {
+    for (row in firstRow..lastRow) {
         for (k in 0..1) {
             val v = row * 2 + k
             val q = (mesh.positions[v * 2] - origin.x) * up.x +
@@ -841,7 +835,7 @@ private fun DrawScope.drawBandShade(
         val t = k.toFloat() / ROLL_SHADE_STOPS
         t to Color(1f, 1f, 1f, shadeAlpha(u0 + (u1 - u0) * t, radius))
     }
-    drawPath(
+    drawHardEdgePath(
         outline,
         Brush.linearGradient(
             colorStops = stops,
@@ -930,6 +924,22 @@ internal class CurlTextureCache {
     }
 }
 
+/**
+ * 用**不抗锯齿**的画笔填一条路径：与网格纹理带的硬边保持一致（见 [newMeshPaint]）。
+ *
+ * 这些路径的边与纸的轮廓是同一条线；两侧都抗锯齿时，两个半覆盖叠在一起，交界处会
+ * 留下一条比两边都暗（或都亮）的发丝线。硬边对硬边则严格互补，没有半覆盖可言。
+ */
+private fun DrawScope.drawHardEdgePath(path: Path, brush: Brush) {
+    drawIntoCanvas { canvas ->
+        val hard = Paint().apply {
+            isAntiAlias = false
+            shader = (brush as ShaderBrush).createShader(size)
+        }
+        canvas.drawPath(path, hard)
+    }
+}
+
 /** 网格纹理画笔：`ImageShader` 建的时候就把像素拷成快照，所以画笔只跟**图的这一版**有关，跟几何无关。 */
 private fun newMeshPaint(image: ImageBitmap): Paint = Paint().apply {
     // 纹理**只在版心材料范围内**绘制，越界像素靠 `Clamp` 兜底不会跨页抹开：
@@ -939,6 +949,10 @@ private fun newMeshPaint(image: ImageBitmap): Paint = Paint().apply {
     shader = ImageShader(image, TileMode.Clamp, TileMode.Clamp)
     // 纸卷把材料压进不到一个半径的屏幕宽度，最邻近采样会把文字抽成锯齿斜条。
     filterQuality = FilterQuality.Low
+    // **硬边**：参考实现跑在 GL 上，纸的轮廓天生不抗锯齿。Skia 默认给 drawVertices
+    // 抗锯齿，轮廓那一像素只有半覆盖，压在它下面的落影就从这半个像素里透出来，
+    // 正脸与卷筒交界处留下一条 1px 暗线（真机实测：该像素比两侧低 40 级）。
+    isAntiAlias = false
     blendMode = BlendMode.SrcOver
 }
 

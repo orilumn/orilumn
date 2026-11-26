@@ -37,8 +37,9 @@ internal class CurlMeshTexture(
  *
  * ## 内存
  *
- * 一张整页合成图在平板口径约 20MB，所以只在**有覆盖层**时才烤，翻页一结束就丢
- * （见 [clear]）：烤图只服务「这一张纸的这一次翻页」，没有跨翻页复用的价值。
+ * 一张整页合成图在平板口径约 20MB，**每次翻页都烤一张**，翻页一结束就丢（见 [clear]）：
+ * 烤图只服务「这一张纸的这一次翻页」，没有跨翻页复用的价值。这 20MB 买的是**整张纸
+ * 只有一种材料**——网格不必再区分版心与页边距，也就没有材料边上的抗锯齿缝。
  */
 internal class CurlPageBake {
 
@@ -74,7 +75,11 @@ internal class CurlPageBake {
         texTop: Float,
     ): CurlMeshTexture? {
         val page = images.page ?: return null
-        val overlay = images.overlay ?: return CurlMeshTexture(page, texLeft, texTop)
+        // **始终烤整页**，没有覆盖层也烤：网格只认一种材料（整页不透明图），页边距就是
+        // 图里的纸色。页栅格只有版心那么大，让网格自己去补页边距，等于在纸上多出两条
+        // 材料边，每条都要靠 1px 外推去盖抗锯齿缝 —— 读者报的「卷筒与纸正面交界处一条
+        // 接缝线」就是这类缝。整页图没有材料边，网格只需贴一张图。
+        val overlay = images.overlay
         val w = pagePixel(pageW)
         val h = pagePixel(pageH)
         baked?.let { cached ->
@@ -96,7 +101,7 @@ internal class CurlPageBake {
         ) {
             drawRect(Color(paperArgb))
             drawImage(page.image, topLeft = Offset(texLeft, texTop))
-            drawImage(overlay.image, topLeft = Offset.Zero)
+            overlay?.let { drawImage(it.image, topLeft = Offset.Zero) }
         }
         val fresh = CurlMeshTexture(RasterTexture(out), 0f, 0f)
         baked = fresh

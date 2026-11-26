@@ -1,7 +1,6 @@
 package orilumn.reader.ui.reader.curl
 
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Rect
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos
@@ -45,13 +44,26 @@ import kotlin.math.sin
  * 卷到拖动方向的另一侧）。两条都别接反：接反时纸卷压在没掀起的那半页上（同一段文字
  * 叠两遍），平铺段又会盖住露出页（翻到九成还像没翻动）。
  *
- * ## 三段可见面（画序即 z 序）
+ * ## 四段可见面（画序即 z 序）
  *
  * | 段 | 位置 | 看得见的那一面 |
  * | --- | --- | --- |
- * | [Surface.Recto] | `z < R`（`x' ≥ −πR/2`） | 纸正面 |
+ * | [Surface.Flat] | `x' > 0`（还没掀起的那半页） | 纸正面，屏幕位置 = 材料位置 |
+ * | [Surface.Recto] | `z < R`（`x' ≥ −πR/2`） | 纸正面（卷筒朝读者那半圈） |
  * | [Surface.Verso] | `z ≥ R`（`−πR ≤ x' < −πR/2`） | 纸背面（卷筒外圈） |
  * | [Surface.Back] | `x' < −πR`（平铺段） | 绕满半圈后翻回来的那一面 |
+ *
+ * ## 整张纸是**一条**三角带
+ *
+ * 平铺的那半页（`Flat`）和卷起来的部分（`Recto`/`Verso`/`Back`）来自同一组扫线、同一条
+ * 三角带。折痕只是**带子里的一条内部扫线**，没有边、没有第二次绘制，栅格化时相邻三角形
+ * 严丝合缝。
+ *
+ * 这正是两个参考实现的做法（moon `Mesh3D.drawiBook`、多看 `CurlRenderer.onDrawFrame`）：
+ * 整页一次性 `glDrawArrays(GL_TRIANGLE_STRIP)`，平铺的半页从来不单独画。早先我们只把
+ * `x' ≤ 0` 放进网格、另一半交给 `drawPage` 整页铺，折痕因此是「两次绘制的交界」——
+ * GPU 光栅化在交界处各自抗锯齿，纸正面与卷筒之间就留下一条与折痕平行的 1px 接缝
+ * （只在纸正面出现；纸背面那条早已随整页贴图消失）。
  *
  * ## 纹理坐标 = 材料坐标
  *
@@ -64,7 +76,8 @@ internal class CurlMesh(
     val positions: FloatArray,
     /** 每顶点 (u, v)，**材料坐标**（页坐标，未折叠）：着色器按它采样纹理。 */
     val texCoords: FloatArray,
-    /** 每顶点「到折痕的弧长」（px）：平铺侧为 0，掀起侧 = `R·|θ|`。 */
+    // 每顶点「到折痕的弧长」（px）：折痕上为 0，掀起侧 = `R·|θ|`；
+    // 还没掀起的那半页（[Surface.Flat]）在折痕另一侧，取负值。`arc` 是按行递增的。
     val arc: FloatArray,
     /** 索引（各段按 [bands] 顺序排列）。 */
     val indices: ShortArray,
@@ -88,6 +101,9 @@ internal class CurlMesh(
     )
 
     internal enum class Surface {
+        /** 还没掀起的那半页（`x' > 0`）：屏幕位置 = 材料位置，纸正面原样。 */
+        Flat,
+
         /** 正面（z < R）：页栅格原样。 */
         Recto,
 
@@ -108,13 +124,6 @@ private const val MAX_SPLITS = 96
 private const val ROW_EPSILON = 0.5f
 
 /**
- * 垫纸色时把版心**收进来**的量（px）：版心边那一行按「版心外」处理，纸色整行垫满，
- * 最多压进版心这么宽（见 [CurlMesh.marginStrips]）。取 1 是因为它只需要盖住抗锯齿那一列，
- * 而版心边本来就是页边距的空白。
- */
-private const val MATERIAL_EDGE_INSET = 1f
-
-/**
  * 纸背内容压淡：盖上去的**纸色不透明度**。
  *
  * 参考实现是 0.1（`BACKFACE_ALPHA = 0.9`，只压一成）：纸背是**一比一的镜像文字**，
@@ -126,31 +135,33 @@ private const val MATERIAL_EDGE_INSET = 1f
 internal const val CURL_BACK_WASH_ALPHA: Float = 0.10f
 
 /**
+ * 纸背压淡从**筒顶**往里渐入的长度（相对半径）。
+ *
+ * 压淡是画在纹理之上的一条路径，它的内沿就是「正面 | 纸背」那条界。界上若已经有浓度，
+ * 这条路径的抗锯齿边就会把那一行混进正面内容（纸背压了一成纸色，正面没有），
+ * 界上就是一条比两侧都亮的细线。渐入到 [CURL_BACK_WASH_RAMP]·R 处才满浓度，
+ * 界上那一行的浓度正好是 0，混不进去；物理上也说得通：筒顶那一圈纸背是侧着的。
+ *
+ * 取 0.15 而不是更大：压淡是均匀的一层，渐入段越长，纸背靠近筒顶那一段就越不像
+ * 「压了一成」；0.15R（平板约 28px）足够把那条线摊成看不见的渐变。
+ */
+internal const val CURL_BACK_WASH_RAMP: Float = 0.15f
+
+/**
  * 由一帧折痕几何 + 卷曲半径生成网格。
  *
  * @param radius 卷曲半径（px）。**是「折痕到还没掀起来那一侧页边的距离」**，不是进度本身
  *   （见 [curlRadius] / `NewCurl3D.updateCurlPos` 的 `dMax`：手指离页边多远就卷多粗）。
  * @param splits 圆柱段的扫线数（越大越圆；三角形数 ≈ 扫线数 × 2）。
- * @param materialRect 页栅格（正文版心）在页坐标里的矩形，见下。
+ * ## 整张纸一种材料
  *
- * ## 版心的那两条竖边也必须是扫线（修「左右页边距各漏出一条缝」）
- *
- * 纸上的内容分两截画：版心那一截贴页栅格（[CurlMesh.textureStrip]），页边距那一截垫纸色
- * （[CurlMesh.marginStrips]）。两截都**按扫线行切**：一整行要么整条在版心里、要么整条在
- * 版心外。折痕竖直时扫线与版心的竖边平行，版心的边**正好落在两行之间**：纹理那一截只能从
- * 版心**内侧**那一行起画，页边距那一截停在版心**外侧**那一行，中间那一格两截都不管，底下
- * 那张露出页的字就从这条缝里透出来（读者：「两侧页边距各有一条几像素宽的接缝」，7～9px）。
- *
- * 所以**在版心边上补一条扫线**：栅格那一截恰好收在版心边上，页边距那一截从同一条线往外
- * 垫满，两截肩并肩、不重叠也不留缝。少了这条线，页边距那一截只能咬到版心内侧那一行，
- * 版心边几像素的正文就被盖成纸色；只补这条线、不让页边距咬住它，缝又回来了
- * （见 [CurlMesh.marginStrips]）。
+ * 贴图是**整页**（见 `CurlPageBake`），材料矩形就是整张纸，所以网格不必为「版心 | 页边距」
+ * 那条材料边补扫线，也不必分两截画：整张纸就是一条连续的三角带。
  */
 internal fun buildCurlMesh(
     shape: CurlShape,
     radius: Float,
     splits: Int = CURL3D_SPLITS,
-    materialRect: Rect? = null,
 ): CurlMesh {
     val w = shape.pageW
     val h = shape.pageH
@@ -182,32 +193,25 @@ internal fun buildCurlMesh(
     val cy = floatArrayOf(0f, 0f, h, h)
     val cornerX = FloatArray(4) { scanX(cx[it], cy[it]) }
     var xMin = cornerX[0]
-    for (i in 1 until 4) if (cornerX[i] < xMin) xMin = cornerX[i]
+    var xMax = cornerX[0]
+    for (i in 1 until 4) {
+        if (cornerX[i] < xMin) xMin = cornerX[i]
+        if (cornerX[i] > xMax) xMax = cornerX[i]
+    }
     // 折痕落在页面外、这一侧没有可掀起的材料：这一帧不该由网格画。
     if (xMin > -1f) return emptyMesh()
 
-    // 扫线：0 → −πR 等分（卷起来的筒），−πR → xMin 等分（翻过去后平铺的纸背），
-    // 外加四条角点扫线（角点精确落在网格上）。
-    // **只保留掀起侧的材料（x' ≤ 0）**：没掀起的那半页由调用方整页画（[drawPage]），
-    // 再让网格盖一遍就是同一张纸画两遍（文字重影、明暗与压淡铺到没掀的纸上）。
-    // 卷起来之后网格在**屏幕**上会压到露出页上——那是纸自己盖住新页，不是重复绘制。
+    // 扫线：xMax → 0 是**还没掀起的那半页**（平铺，屏幕不动），0 → −πR 等分是卷起来的筒，
+    // −πR → xMin 等分是翻过去后平铺的纸背，外加四条角点扫线（角点精确落在网格上）。
+    //
+    // **整张纸都进这条带子**（参考实现同样如此）：折痕若只是「网格最后一列」，它就是
+    // 网格与 `drawPage` 两次绘制的交界，两边各自抗锯齿 ⇒ 折痕左侧一条 1px 接缝。把没掀起
+    // 的半页也放进同一条三角带，折痕变成内部扫线，没有边可缝。
     //
     // 平铺段那一段扫线**不能省**：只放筒的扫线时，「平铺段」整段只剩「筒末一条 → 页角一条」
     // 那一个大四边形（折痕竖直时正好一条四边形，折痕一斜连这条四边形都没有），
     // 纸背要么被拉成一片空白、要么根本不存在 —— 读者那句「页面反面从来没画过」就是它。
     val n = splits.coerceIn(2, MAX_SPLITS)
-    // 版心两条竖边的扫线参数（见上面的 `materialRect`），补进扫线表且 **不许被合并掉**：
-    // 被合并就是漏一条缝。
-    val materialRows = if (materialRect == null) {
-        FloatArray(0)
-    } else {
-        floatArrayOf(
-            scanX(materialRect.left, materialRect.top),
-            scanX(materialRect.right, materialRect.top),
-            scanX(materialRect.left, materialRect.bottom),
-            scanX(materialRect.right, materialRect.bottom),
-        )
-    }
     val raw = ArrayList<Float>(n * 2 + 10)
     raw.add(0f)
     for (i in 1 until n) raw.add(-halfTurn * i / (n - 1))
@@ -216,20 +220,16 @@ internal fun buildCurlMesh(
         for (i in 1..n) raw.add(-halfTurn - flap * i / n)
     }
     for (i in 0 until 4) raw.add(cornerX[i])
-    // 折痕斜着时扫线与版心边不平行，[rowSpan] 会把行切在版心边上（精确到亚像素），
-    // 补这两条只是多两条扫线，不会画错。
-    for (x in materialRows) raw.add(x)
     raw.sortDescending()
     // 页角那几条扫线**不许被合并掉**：它们与等分扫线只差零点几像素时照样保留。
     // 合并掉就会让两条页边停在离页角几个像素的地方（角附近两条页边夹角很小，差半像素的
     // 扫线能拉出好几像素长的弦）：纸带末端是一条凭空截断的斜边，纸角那块扇形影更因为
     // 「两条页边没在角上碰头」整个不画 —— 读者报「页角正好位于卷筒左侧边时扇形影会消失」。
-    val cornerRows = HashSet<Float>(4 + materialRows.size)
-    for (c in cornerX) if (c <= ROW_EPSILON && c >= xMin - ROW_EPSILON) cornerRows.add(c)
-    for (c in materialRows) if (c <= ROW_EPSILON && c >= xMin - ROW_EPSILON) cornerRows.add(c)
+    val cornerRows = HashSet<Float>(4)
+    for (c in cornerX) if (c <= xMax + ROW_EPSILON && c >= xMin - ROW_EPSILON) cornerRows.add(c)
     val rows = ArrayList<Float>(raw.size)
     for (x in raw) {
-        if (x > ROW_EPSILON) continue
+        if (x > xMax + ROW_EPSILON) continue
         if (x < xMin - ROW_EPSILON) continue
         if (rows.isNotEmpty() && rows.last() - x < ROW_EPSILON) {
             // 完全重合的照样只留一条；只是「贴得近」的页角扫线要留下。
@@ -317,12 +317,13 @@ internal fun buildCurlMesh(
     }
     if (rowX.size < 2) return emptyMesh()
 
-    // 三角形：相邻两条扫线连成两个三角；按行所属可见面分段，画序 = Recto → Verso → Back。
+    // 三角形：相邻两条扫线连成两个三角；按行所属可见面分段，画序 = Flat → Recto → Verso → Back。
     val tris = ArrayList<Short>(rowX.size * 6)
     val segSurface = arrayOfNulls<CurlMesh.Surface>(rowX.size - 1)
     for (row in 0 until rowX.size - 1) {
         val mid = (rowX[row] + rowX[row + 1]) * 0.5f
         val surface = when {
+            mid > ROW_EPSILON -> CurlMesh.Surface.Flat
             mid >= -halfTurn -> if (curlZ(mid) >= r) CurlMesh.Surface.Verso else CurlMesh.Surface.Recto
             else -> CurlMesh.Surface.Back
         }
@@ -335,7 +336,12 @@ internal fun buildCurlMesh(
         tris.add(a1); tris.add(b1); tris.add(b0)
     }
 
-    val order = listOf(CurlMesh.Surface.Recto, CurlMesh.Surface.Verso, CurlMesh.Surface.Back)
+    val order = listOf(
+        CurlMesh.Surface.Flat,
+        CurlMesh.Surface.Recto,
+        CurlMesh.Surface.Verso,
+        CurlMesh.Surface.Back,
+    )
     val idx = ShortArray(tris.size)
     val bands = ArrayList<CurlMesh.Band>(3)
     var iCount = 0
@@ -365,6 +371,7 @@ internal fun buildCurlMesh(
                     indexStart = start,
                     indexCount = iCount - start,
                     depth = when (s) {
+                        CurlMesh.Surface.Flat -> 0f
                         CurlMesh.Surface.Recto -> 0f
                         CurlMesh.Surface.Verso -> 0.5f
                         CurlMesh.Surface.Back -> 1f
@@ -410,6 +417,19 @@ internal fun CurlMesh.bandOutline(firstRow: Int, lastRow: Int): List<Offset> {
     return pts
 }
 
+/**
+ * 纸背（卷筒外圈 + 绕回来的平铺段）占的扫线区间；没卷起来时 `null`。
+ *
+ * 网格是一条**连续的三角带**，正面与纸背贴的是同一张整页图（纸背的字是同一页纸从背面看，
+ * 由几何自己镜像出来），所以纹理**一趟铺满整张纸**就够，不必按面分趟。参考实现分两趟，
+ * 是因为它要给纸背单独压一层 0.9 的纸色；我们那层压淡是另一条路径（见
+ * [CURL_BACK_WASH_ALPHA]），只需要知道纸背从哪一行开始。
+ */
+internal fun CurlMesh.backFaceRows(): IntRange? {
+    val verso = bands.firstOrNull { it.surface == CurlMesh.Surface.Verso } ?: return null
+    return verso.firstRow..bands.last().lastRow
+}
+
 /** 掀起侧的最远弧长（= `−x'` 最小值），供调用方算卷起来的高度。 */
 internal fun CurlMesh.maxArc(): Float = arc.maxOrNull() ?: 0f
 
@@ -417,10 +437,11 @@ internal fun CurlMesh.maxArc(): Float = arc.maxOrNull() ?: 0f
  * 整张纸的**两条页边**（`折痕端 → 直角顶点` 折线，页坐标）。
  *
  * 每行的两个端点就是纸的两条页边：`row*2` 是沿折痕 `λ` 较大的那条，`row*2+1` 是另一条。
- * 顺序按扫线走（`x'` 从 0 递减），所以：
+ * 顺序按扫线走（`x'` 从大到小），所以折痕那条线**落在中间**：它前面是还没掀起的半页
+ * （[CurlMesh.Surface.Flat]，影不铺到那里），后面才是纸卷与平铺段。
  *
- * - **首点**在折痕上，就是页边与屏幕边缘的交点（折痕斜时在上下页边、竖直时在左右页边）；
- * - **末点**是最远的页角，也就是纸背那个直角顶点。
+ * - **首点**在最远的未掀起纸边，**末点**是最远的页角（纸背那个直角顶点）；
+ * - 影只需要折痕之后那一段，[firstRowAtArc] 给的就是它的起点。
  *
  * 折线**跨全部扫线行**（正面段、纸背段都算），所以它天然分成两截：贴着折痕那截是卷起来的
  * 花瓣弧（曲线），平铺段那截是直线。沿边铺影时「页边是直线就画直线、是弧就画曲线」全靠它，
@@ -546,9 +567,16 @@ private fun CurlMesh.stripOf(
     return CurlTextureStrip(positions = pos, texCoords = uv, vertexCount = rows * 2)
 }
 
-/** 见 [CurlTextureStrip]。整段都不在版心里时返回 `null`。 */
+/**
+ * 扫线区间 `firstRow..lastRow` 的纹理带。
+ *
+ * 贴图现在是**整页**（见 `CurlPageBake`），材料矩形就是整张纸，所以每一行都整行落在
+ * 材料里：`first == firstRow`、`last == lastRow`，得到的是铺满这一段纸的整条三角带。
+ * 保留按行求交的写法，是为了「贴图缺一块」时（例如只有版心的旧路径）仍然只画有像素的部分。
+ */
 internal fun CurlMesh.textureStrip(
-    band: CurlMesh.Band,
+    firstRow: Int,
+    lastRow: Int,
     texLeft: Float,
     texTop: Float,
     texWidth: Float,
@@ -557,11 +585,11 @@ internal fun CurlMesh.textureStrip(
     val right = texLeft + texWidth
     val bottom = texTop + texHeight
     fun spanAt(row: Int) = rowSpan(row, texLeft, texTop, right, bottom)
-    // 材料矩形是凸的、行按材料坐标单调推移：能落在版心内的行是一段连续区间，
+    // 材料矩形是凸的、行按材料坐标单调推移：能落在材料内的行是一段连续区间，
     // 断掉之后不会又回来，所以找到首行之后一断就收尾。
     var first = -1
     var last = -1
-    for (row in band.firstRow..band.lastRow) {
+    for (row in firstRow..lastRow) {
         if (spanAt(row) == null) {
             if (first >= 0) break
             continue
@@ -571,142 +599,6 @@ internal fun CurlMesh.textureStrip(
     }
     if (first < 0) return null
     return stripOf(first, last, ::spanAt, texLeft, texTop)
-}
-
-/**
- * **页边距**那部分三角带（材料落在页栅格之外），0～2 条。
- *
- * 纸的每一段都要垫一层纸色，好让「版心里没有像素的那一截」（页边距）露出纸色，而不是透出
- * 底下的另一页（纸卷自叠时，压在下面那一层的正是这张纸自己的正面纹理）。但纸色**只能垫在
- * 版心之外**：版心那一块由纹理自己铺满，两处都铺的话纹理的抗锯齿边就压在纸色上 —— 交界
- * 那一列像素拿到「半列纸色 + 半列纹理」，比两边都亮。读者报的「卷筒与纸正面交界处有一条
- * 多余的接缝线」正是它，反面同一条（段与段共用的那行扫线也一样）。
- *
- * 行按材料坐标单调推移，版心占的是连续的一段扫线，于是**只出两条带**：
- *
- * - 「版心之前」：整条扫线区间一条，行落在版心外时是整行、落进版心后收成 `[0, t0]`；
- * - 「版心之后」：只铺版心内那几行，`[t1, 1]`。
- *
- * ## 为什么必须是**一条**带、而不是按行拆成好几条
- *
- * 两条各自抗锯齿的三角带首尾相接时，接缝那一行拿到 `0.5 + 0.5·(1−0.5) = 0.75` 的覆盖率，
- * 剩下两成半露出底下的东西 —— 纸色在白纸上就是一条**很细的灰色虚线**（读者 2026-11-25：
- * 「很细的灰色线，在卷筒与书页正面的交接处」）。所以「段首整行 + 版心内一截」必须是同一条
- * 带，靠 `head(row)` 在行与行之间连续收窄，而不是两条带对拼。
- *
- * ## 版心边按「外」判（版心收 1px）
- *
- * 折痕竖直时扫线与版心的竖边平行，版心的边正好落在两条扫线之间：判「这一行在版心里」时
- * 若按真版心算，版心边那一行会被算成「整行都在版心里」，纸色在那里收成零宽 —— 它与纹理
- * 之间就漏出一格（读者报的「两侧页边距各有一条接缝、漏出下一页的字」）。所以这里把版心
- * **收 1px** 再判：版心边那一行因此算「版心外」，按整行垫满；纸色最多压进版心 1px，那一列
- * 本来就是页边距的空白，看不见。
- */
-internal fun CurlMesh.marginStrips(
-    band: CurlMesh.Band,
-    texLeft: Float,
-    texTop: Float,
-    texWidth: Float,
-    texHeight: Float,
-): List<CurlTextureStrip> {
-    val inset = MATERIAL_EDGE_INSET
-    val right = texLeft + texWidth - inset
-    val bottom = texTop + texHeight - inset
-    fun inside(row: Int) = rowSpan(row, texLeft + inset, texTop + inset, right, bottom)
-    var first = -1
-    var last = -1
-    for (row in band.firstRow..band.lastRow) {
-        if (inside(row) == null) continue
-        if (first < 0) first = row
-        last = row
-    }
-    val out = ArrayList<CurlTextureStrip>(2)
-    /** 版心之前那一截：`[0, t0]`；整行都在版心外时是整行（段首的页边距全靠它垫）。 */
-    fun head(row: Int): FloatArray {
-        val s = inside(row) ?: return floatArrayOf(0f, 1f)
-        return floatArrayOf(0f, s[0])
-    }
-    /** 版心之后那一截：`[t1, 1]`；只铺版心内那几行（版心外的整行已由 [head] 垫满）。 */
-    fun tail(row: Int): FloatArray {
-        val s = inside(row) ?: return floatArrayOf(1f, 1f)
-        return floatArrayOf(s[1], 1f)
-    }
-    stripOf(band.firstRow, band.lastRow, ::head, texLeft, texTop)?.let {
-        // 段界（Recto|Verso、Verso|Back 共用的那行扫线）两侧各画一条纸色路径：各自抗锯齿，
-        // 覆盖率合不成 1，界上留一条很细的灰线（读者 2026-11-25 报的「卷筒与书页正面交接处
-        // 很细的灰色线」）。把首/末行朝相邻段外推 1px，落点必然还在相邻段的**纸色**里
-        //（共用行上材料点相同，纸/纹理归属相同），所以看不见，只把那条缝盖掉。
-        it.bleedEdges(this, band.firstRow, band.lastRow, texWidth, texHeight)
-        out.add(it)
-    }
-    if (first >= 0) stripOf(first, last, ::tail, texLeft, texTop)?.let {
-        it.bleedEdges(this, first, last, texWidth, texHeight)
-        out.add(it)
-    }
-    return out
-}
-
-/** 段界上盖缝的外推距离（px）。只需要盖住抗锯齿那一列。 */
-private const val SEAM_BLEED = 1f
-
-/**
- * 版心边多近算「正文切边」（px）：这一端不参与外推。纸色压进版心 1px 是有意为之
- *（判内外时版心收 1px），但再往外推就压到正文上了 —— 折痕正好擦过正文块的角时，
- * 那一列会比两侧都亮（实测 0.24，正文 0.21），看着像纸上多了一个亮点。
- */
-private const val BLEED_EDGE_GUARD = 2f
-
-/**
- * 把三角带的首行朝 [firstRow] 的上一条扫线、末行朝 [lastRow] 的下一条扫线各外推
- * [SEAM_BLEED] 像素（见 [marginStrips] 的段界说明）。
- */
-private fun CurlTextureStrip.bleedEdges(
-    mesh: CurlMesh,
-    firstRow: Int,
-    lastRow: Int,
-    texWidth: Float,
-    texHeight: Float,
-) {
-    val rows = vertexCount / 2
-    if (rows < 2) return
-    /** 这一端压在正文切边上没有（见 [BLEED_EDGE_GUARD]）：是就不外推。 */
-    fun onMaterialEdge(vertex: Int): Boolean {
-        val u = texCoords[vertex * 2]
-        val v = texCoords[vertex * 2 + 1]
-        return abs(u) <= BLEED_EDGE_GUARD || abs(u - texWidth) <= BLEED_EDGE_GUARD ||
-            abs(v) <= BLEED_EDGE_GUARD || abs(v - texHeight) <= BLEED_EDGE_GUARD
-    }
-    fun mid(row: Int) = Offset(
-        (mesh.positions[row * 4] + mesh.positions[row * 4 + 2]) * 0.5f,
-        (mesh.positions[row * 4 + 1] + mesh.positions[row * 4 + 3]) * 0.5f,
-    )
-    fun push(base: Int, from: Int, toward: Int) {
-        if (toward < 0 || toward >= mesh.vertexCount / 2) return
-        val a = mid(from)
-        val b = mid(toward)
-        val len = hypot(b.x - a.x, b.y - a.y)
-        if (len < 1e-3f) return
-        val ox = (b.x - a.x) / len * SEAM_BLEED
-        val oy = (b.y - a.y) / len * SEAM_BLEED
-        val v0 = base / 2
-        val s0 = if (onMaterialEdge(v0)) 0f else 1f
-        val s1 = if (onMaterialEdge(v0 + 1)) 0f else 1f
-        positions[base] += ox * s0
-        positions[base + 1] += oy * s0
-        positions[base + 2] += ox * s1
-        positions[base + 3] += oy * s1
-    }
-    push(0, firstRow, firstRow - 1)
-    push((rows - 1) * 4, lastRow, lastRow + 1)
-}
-
-/** 三角带的**外轮廓**（页坐标多边形）：先沿一侧页边走到底，再沿另一侧走回来。纸色打底用。 */
-internal fun CurlTextureStrip.outlinePath(): List<Offset> {
-    val rows = vertexCount / 2
-    val pts = ArrayList<Offset>(rows * 2)
-    for (i in 0 until rows) pts.add(Offset(positions[i * 4], positions[i * 4 + 1]))
-    for (i in rows - 1 downTo 0) pts.add(Offset(positions[i * 4 + 2], positions[i * 4 + 3]))
-    return pts
 }
 
 private fun emptyMesh() = CurlMesh(

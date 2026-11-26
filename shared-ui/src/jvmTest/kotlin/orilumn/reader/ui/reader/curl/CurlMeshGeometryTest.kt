@@ -14,7 +14,8 @@ import org.junit.Test
  *
  * 1. 扫线端点来自**页面矩形**的交点 ⇒ 纸带从页顶贯通到页底，页面角点也在网格里；
  * 2. 屏幕位置只由「到折痕的 x'」决定 ⇒ 页面上的直角仍然是直角；
- * 3. 网格**只盖掀起的那一半材料**：没掀的半页由调用方整页画，盖两遍会重影；
+ * 3. 网格**盖住整张纸**：平铺半页与卷起来的部分是同一条三角带，折痕只是内部扫线
+ *    （与 moon / 多看两个参考实现一致，见 `wholeSheetIsOneTriangleStripWithTheFoldInside`）；
  * 4. 纸卷**朝掀起侧鼓出去**、绕满半圈的平铺段落回**没掀起**的那一侧（接反就是
  *    「三段文字」＋「翻到九成还像没翻动」）；
  * 5. 纸卷是个看得见的筒（半径上限 10% 页宽），不是「筒径等于整页」，也不至于细成一条白边。
@@ -144,10 +145,12 @@ class CurlMeshGeometryTest {
     fun rollBulgesTowardTheLiftedSide() {
         // 掀起的材料在折痕右侧 ⇒ 纸卷必须鼓在**右边**（露出页那一侧），
         // 绕满半圈后的平铺段落回左边（盖在还没翻走的纸上）。两侧接反就是「三段文字」。
+        // [CurlMesh.Surface.Flat] 是**还没掀起**的那半页，本来就该在折痕另一边，不参与这条。
         for (p in listOf(0.2f, 0.5f, 0.9f)) {
             val shape = curlShape(w, h, p, 1, 0f)
             val mesh = meshAt(p)
             for (band in mesh.bands) {
+                if (band.surface == CurlMesh.Surface.Flat) continue
                 val pts = mesh.bandOutline(band)
                 if (band.surface == CurlMesh.Surface.Back) {
                     assertTrue(
@@ -165,6 +168,7 @@ class CurlMeshGeometryTest {
             val backShape = curlShape(w, h, p, -1, 0f)
             val backMesh = meshAt(p, direction = -1)
             for (band in backMesh.bands) {
+                if (band.surface == CurlMesh.Surface.Flat) continue
                 val pts = backMesh.bandOutline(band)
                 if (band.surface == CurlMesh.Surface.Back) {
                     assertTrue(
@@ -181,22 +185,72 @@ class CurlMeshGeometryTest {
         }
     }
 
+    /**
+     * 整张纸是**一条**三角带：平铺半页（[CurlMesh.Surface.Flat]）与卷起来的纸共用扫线，
+     * 折痕是带子内部的**一行**，不是带子的边界。
+     *
+     * 这正是两个参考实现（moon `Mesh3D.drawiBook`、多看 `CurlRenderer.onDrawFrame`）的画法。
+     * 早先网格只含 `x' ≤ 0`，另一半交给 `drawPage` 整页铺 —— 折痕成了两次绘制的交界，
+     * 真机 GPU 上留下一条与折痕平行的 1px 接缝。这条测试锁住新结构，防止再拆回去。
+     */
     @Test
-    fun meshCoversOnlyTheLiftedMaterial() {
-        // 网格只铺掀起的**材料**：材料坐标必须全在折痕掀起的那一侧。
-        // 连没掀的半页一起铺，就是同一张纸画两遍（文字重影），明暗与压淡也会铺到没掀的纸上。
+    fun wholeSheetIsOneTriangleStripWithTheFoldInside() {
         for (p in listOf(0.2f, 0.5f, 0.9f)) {
             for (dir in listOf(1, -1)) {
-                val shape = curlShape(w, h, p, dir, 0f)
-                val mesh = meshAt(p, direction = dir)
-                for (v in 0 until mesh.vertexCount) {
-                    val u = mesh.texCoords[v * 2]
-                    if (dir >= 0) {
-                        assertTrue("p=$p 材料 $u 跑到折痕左边（没掀的半页）", u >= shape.foldX - 1f)
-                    } else {
-                        assertTrue("p=$p 材料 $u 跑到折痕右边（没掀的半页）", u <= shape.foldX + 1f)
+                val shape = curlShape(w, h, p, dir, 0.2f)
+                val mesh = meshAt(p, tilt = 0.2f, direction = dir)
+                // 行顺序 = x' 递减 ⇒ 弧长非递减，一条带子可以从头连到尾。
+                for (row in 1 until mesh.vertexCount / 2) {
+                    assertTrue(
+                        "p=$p dir=$dir 扫线顺序断了：第 $row 行弧长 ${mesh.arc[row * 2]} < 上一行",
+                        mesh.arc[row * 2] >= mesh.arc[(row - 1) * 2] - 0.5f,
+                    )
+                }
+                val flat = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Flat }
+                val recto = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Recto }
+                assertTrue("p=$p dir=$dir 平铺半页必须进网格", flat != null)
+                assertTrue("p=$p dir=$dir 卷筒前半圈必须进网格", recto != null)
+                // 折痕是内部行：平铺段的末行就是卷筒段的起始行，两段首尾相接。
+                assertEquals(
+                    "p=$p dir=$dir 折痕不在带子内部：flat=$flat recto=$recto",
+                    flat!!.lastRow,
+                    recto!!.firstRow,
+                )
+                assertTrue(
+                    "p=$p dir=$dir 折痕必须是内部扫线（前面还有平铺行）",
+                    flat.firstRow < recto.firstRow,
+                )
+                // 平铺半页屏幕位置 = 材料位置（没卷起来，也不该被挪动）。
+                for (row in flat.firstRow..flat.lastRow) {
+                    for (k in 0..1) {
+                        val v = row * 2 + k
+                        assertEquals(
+                            "p=$p dir=$dir 平铺半页被挪动了：行 $row",
+                            mesh.texCoords[v * 2],
+                            mesh.positions[v * 2],
+                            1f,
+                        )
+                        assertEquals(
+                            "p=$p dir=$dir 平铺半页被挪动了：行 $row",
+                            mesh.texCoords[v * 2 + 1],
+                            mesh.positions[v * 2 + 1],
+                            1f,
+                        )
                     }
                 }
+                // 整张纸的四角都在材料里：网格覆盖整页，没有留下给 drawPage 的缺口。
+                var minU = Float.MAX_VALUE
+                var maxU = -Float.MAX_VALUE
+                var minV = Float.MAX_VALUE
+                var maxV = -Float.MAX_VALUE
+                for (v in 0 until mesh.vertexCount) {
+                    val u = mesh.texCoords[v * 2]
+                    val t = mesh.texCoords[v * 2 + 1]
+                    minU = minOf(minU, u); maxU = maxOf(maxU, u)
+                    minV = minOf(minV, t); maxV = maxOf(maxV, t)
+                }
+                assertTrue("p=$p dir=$dir 材料没铺满页宽：$minU..$maxU", minU <= 1f && maxU >= w - 1f)
+                assertTrue("p=$p dir=$dir 材料没铺满页高：$minV..$maxV", minV <= 1f && maxV >= h - 1f)
             }
         }
     }
@@ -339,7 +393,8 @@ class CurlMeshGeometryTest {
     fun threeSurfacesAppearInOrder() {
         // 筒径固定（0.10 页宽）之后，纸卷绕半圈要吃掉 πR 的纸：掀起长度不到 πR/2 时连纸背
         // 都还没绕出来，不到 πR 时没有平铺段。这是「筒径整段不变」的**已知代价**（起手那
-        // 几下翻起来只是一根细筒），过了门槛三段就齐了；画序就是 z 序：正面 → 纸背 → 平铺段。
+        // 几下翻起来只是一根细筒），过了门槛各段就齐了；画序就是 z 序：
+        // 未掀起的半页 → 正面 → 纸背 → 平铺段。
         val radius = cap
         val versoFrom = PI.toFloat() * radius / 2f / w
         val backFrom = PI.toFloat() * radius / w
@@ -365,15 +420,19 @@ class CurlMeshGeometryTest {
         )
         for (p in listOf(0.5f, 0.7f, 0.9f)) {
             val order = meshAt(p).bands.map { it.surface }
-            assertEquals("画序必须是正面 → 纸背 → 平铺段", order.sortedBy { it.ordinal }, order)
+            assertEquals("画序必须是未掀起半页 → 正面 → 纸背 → 平铺段", order.sortedBy { it.ordinal }, order)
         }
     }
 
     @Test
     fun arcFollowsTheMaterial() {
         // 弧长 = 到折痕的纸面距离，必须单调跟着扫线走，折痕上为 0。
+        // 折痕现在不是第 0 行：它前面是还没掀起的那半页（弧长为负）。
         val mesh = meshAt(0.9f)
-        assertEquals("折痕上弧长为 0", 0f, mesh.arc[0], 0.5f)
+        val foldRow = mesh.bands.first { it.surface == CurlMesh.Surface.Recto }.firstRow
+        assertTrue("折痕之前必须有平铺半页", foldRow > 0)
+        assertTrue("未掀起的半页弧长应为负：${mesh.arc[0]}", mesh.arc[0] < 0f)
+        assertEquals("折痕上弧长为 0", 0f, mesh.arc[foldRow * 2], 0.5f)
         assertTrue("掀起侧最远弧长应接近整页被卷起的材料量", mesh.arc.max() > w * 0.8f)
         // 明暗按弧长算卷曲高度：p=0.9 时材料远超半圈，最高处就是 2R。
         val radius = curlRadius(curlShape(w, h, 0.9f, 1))

@@ -84,9 +84,9 @@ internal data class CurlShape(
     /**
      * 折痕倾斜量（正 = 上端 `foldX − lean·tiltW`、下端 `foldX + lean·tiltW`）。
      *
-     * 符号只跟竖向动作走（见 [leanOf]：手指向上、纸角就向上转，与起手在哪一侧无关），
-     * 也已做扶正（结算跟手交接时翻页用 [settleLeanFade]、回弹用 [settleLeanRewind]，
-     * 点按用 [tailFade]）/ 跟手时的竖向行程收小。
+     * 跟手时由 [leanOf] 从拖动方向算出（折痕垂直于手指轨迹；折痕锚点的横向符号由起手
+     * 横滑方向锁住，见 [CurlPull.direction]），也已做扶正（结算跟手交接时翻页用
+     * [settleLeanFade]、回弹用 [settleLeanRewind]，点按用 [tailFade]）/ 跟手时的竖向行程收小。
      */
     val lean: Float,
     /**
@@ -208,6 +208,15 @@ data class CurlPull(
      * （[pullEngage]，见 `FlipController.updateCurlPull`），到位之后 [blend] = 1，完全交给手。
      */
     val blend: Float = 1f,
+    /**
+     * 这次拖动属于哪个翻页方向（+1 下一页 / -1 上一页）。
+     *
+     * 只给**折痕锚点**定横向符号用：它的 `from` 就是按下点，手指越过按下点后 `u_x` 换号，
+     * 而折痕要垂直于手指轨迹（[leanOf]）。翻页方向记录的是**起手那一刻**的横滑方向
+     * （`direction = −sign(起手 u_x)`），整个手势不变——起手就垂直，越过按下点也不镜像。
+     * 页边锚点的 `from` 是页右缘，手指永远在它左边（`u_x < 0`），用不到它。
+     */
+    val direction: Int = 1,
 ) {
     /** 拖动单位方向；位移太小（方向是噪声）时返回 null。 */
     fun unit(): Offset? {
@@ -222,21 +231,33 @@ data class CurlPull(
 /**
  * 拖动方向 ⇒ 折痕倾斜量（[CurlShape.lean] 的输入）。
  *
- * ## 符号只跟竖向动作走（横向分量只决定大小）
+ * ## 折痕垂直于手指轨迹
  *
- * 读者口径是**手指向上、纸角就向上转**，四种起手（左右半边 × 两个翻页方向）一个口径，
- * 手指滑到起手点哪一侧都一样。所以倾斜的符号只能取自 `u_y`：
+ * 折痕方向是 `(bottomX − topX, h) = (2·lean·tiltW, h)`，要求它与拖动方向 `(u_x, u_y)` 垂直：
  *
  * ```
- *   lean = (u_y / |u_x|) · h / (2·tiltW)      （正负完全由 u_y 决定）
+ *   lean = −(u_y / u_x) · h / (2·tiltW)
  * ```
  *
- * 早先用的是 `−u_y/u_x`。手指一直待在起手点同一侧时它没问题，可折痕锚点的起点就是按下点：
- * 手指滑出去再滑回来、**越过按下点**之后 `u_x` 换号，斜率跟着换号，整根折痕当场镜像——
- * 读者原话：「屏幕左侧左滑，手指滑回到右侧，这时上下移动，手势还是反向的」。页边锚点碰不到
- * 这件事（起点是页右缘，手指永远在它左边），所以它只在折痕锚点跨过按下点时出现。把大小与
- * 符号拆开（分母取 `|u_x|`）之后，跨过去再多来回也只有一个口径，也**不需要再按翻页方向 /
- * 锚点做任何取反**——那类特判本身就会让某一侧反向。
+ * 纯水平拖动 `u_y = 0` ⇒ 竖折痕；纯上下拖方向退化、斜率爆掉，由 [verticalLeanCap] 兜住。
+ *
+ * ## 两种锚点的横向符号
+ *
+ * 页边锚点的 `from` 是页右缘，手指永远在它左边 ⇒ `u_x < 0` 恒成立，上式直接可算。
+ *
+ * 折痕锚点的 `from` 就是按下点，`u_x` 会随手指越过按下点换号：直接照上式算，折痕会在
+ * 跨过按下点的那一帧整根镜像（读者 2026-11-19 报的「滑回右侧，手势还是反向」）。所以
+ * 折痕锚点的横向符号取**起手那一刻**的 `sign(u_x)`，由 [CurlPull.direction] 锁住
+ * （横滑方向决定翻页方向，`direction = −sign(起手 u_x)`），整个手势不变：
+ *
+ * ```
+ *   lean = direction · (u_y / |u_x|) · h / (2·tiltW)      （折痕锚点）
+ * ```
+ *
+ * 起手就垂直，越过按下点也不镜像。早先两种锚点都用 `u_y/|u_x|`，等于把折痕锚点的符号
+ * 固定成「下一页」那一侧：屏幕左侧起手翻上一页（起手 `u_x > 0`）时，折痕与手指方向平行
+ * 而不是垂直——读者 2026-11-26 报的「屏幕左侧起手，折痕方向没有与手指运行方向垂直，而是
+ * 相反的」正是它。页边锚点没有这个自由度（`u_x` 恒负），仍用 `u_y/|u_x|`。
  *
  * ## 大小
  *
@@ -264,7 +285,10 @@ internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
     val h = pageH.coerceAtLeast(1f)
     val tiltW = w * CURL_TILT_WIDTH
     val ax = kotlin.math.abs(u.x).coerceAtLeast(1e-4f)
-    val wanted = u.y / ax * h / (2f * tiltW)
+    // lean = −u_y/u_x · h/(2·tiltW)。页边锚点的 u_x 恒为负；折痕锚点的 u_x 会越过按下点
+    // 换号，横向符号改用起手那一侧（direction = −sign(起手 u_x)）锁住。
+    val sideways = if (pull.anchor == CurlAnchor.Crease) pull.direction.toFloat() else 1f
+    val wanted = sideways * u.y / ax * h / (2f * tiltW)
     val cap = verticalLeanCap(pull, tiltW)
     return leanWithinPageEnds(pull, w, h, wanted.coerceIn(-cap, cap))
 }
@@ -349,13 +373,14 @@ internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
  *
  * @param direction +1 向后翻 / -1 向前翻（来自 [orilumn.reader.ui.reader.FlipSession.direction]）
  * @param tilt 折痕倾斜量（0 = 竖直折痕）。拖动中由 [leanOf] 从拖动方向算出——**是斜率**，
- *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹；**符号只跟竖向动作走**
- *   （见 [leanOf] 的 KDoc），结算期间保持松手那一刻的值。
+ *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹（折痕锚点的横向符号由
+ *   起手横滑方向锁住，见 [CurlPull.direction]），结算期间保持松手那一刻的值。
  *   这是**想要的**倾斜，跟手时 [leanOf] 已按竖向行程（[verticalLeanCap]）夹过；书脊这一侧
  *   不再压倾斜——折痕端点可以卷过书脊一个筒径（见文件头）。
  * @param pull 本次拖动（起手点 + 此刻手指 + 起手那一刻定的锚点），非 null 时折痕位置改由它
  *   反解，两种锚点都跟手（见 [CurlAnchor]）：右半边起手 ⇒ 纸边压手指（[anchoredFoldX]），
- *   左半边起手 ⇒ 折痕穿手指（[creaseFoldX]）。**与翻页方向无关**，两个方向同一套。
+ *   左半边起手 ⇒ 折痕穿手指（[creaseFoldX]）。锚点与翻页方向无关，两个方向同一套；
+ *   翻页方向只经 [CurlPull.direction] 影响折痕锚点的横向符号（见 [leanOf]）。
  * @param fade 阴影淡出系数（0..1）。NaN = 按 [tailFade] 从进度算（点按 / 无手指）。
  *   结算从**跟手那一帧**接手时由 `FlipController` 逐帧给：拖到页角折起来时屏幕可见进度
  *   常常是负的（折痕中点在自由边之外），照 [tailFade] 算会在松手那一帧把阴影直接归零、
@@ -531,7 +556,7 @@ internal fun CurlShape.fullyTurned(): Boolean = !anchored && progress >= 1f
  *
  * 上一页不是把下一页的几何左右镜像（那样书脊会跑到右边），而是**同一套几何倒着走**：
  * 进度取 `1-p`，折痕因此仍在 `w·p`；倾斜**原样带过去，不在这里取反**——倾斜的符号由
- * [leanOf] 统一按竖向动作定（手指向上、纸角就向上转），到这里已经是两个方向同一口径的量。
+ * [leanOf] 按拖动方向与 [CurlPull.direction] 定，到这里已经是屏幕上该用的那个量。
  * 再由 [turningIsTarget] 把正面/露出页两张图换位。
  */
 internal data class CurlFrame(

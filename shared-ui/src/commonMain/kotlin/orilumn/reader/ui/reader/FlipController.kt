@@ -494,7 +494,8 @@ class FlipController(
      * 滞后（斜拖时折痕角度永远追不上手指），所以这里不再平滑。
      *
      * @param downX/downY 按下点（页坐标）：`downY` 是抓点的行（与参考实现 `mDragStartPos` 同口径），
-     *   `downX` 决定锚点模式——右半边 `Edge`、左半边 `Crease`（见 [CurlAnchor]），整个手势只判这一次
+     *   `downX` 决定锚点模式——右半边 `Edge`、左半边 `Crease`（见 [CurlAnchor]），整个手势只判这一次。
+     *   锚点本身与翻页方向无关；翻页方向只给折痕锚点锁横向符号（见 `curl/CurlPull.direction`）
      * @param x/y 此刻手指的页坐标
      * @param pageW/pageH 当前页尺寸（px）：折痕斜率按页宽页高换算
      */
@@ -525,6 +526,9 @@ class FlipController(
             to = Offset(x, y),
             anchor = if (crease) CurlAnchor.Crease else CurlAnchor.Edge,
             blend = blend,
+            // 折痕锚点的横向符号由起手横滑方向锁住（见 `curl/leanOf`）：翻页方向在
+            // `beginDrag` 就定了，整个手势不变。
+            direction = direction.value,
         )
         curlPull.value = pull
         curlLean.value = leanOf(pull, pageW, pageH)

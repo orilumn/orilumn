@@ -192,6 +192,15 @@ class ReaderActivity : ComponentActivity() {
     private val statusInsetTopPx = mutableIntStateOf(0)
 
     /**
+     * 当前系统导航栏底 inset（物理 px，随显隐动画逐帧更新）。
+     *
+     * 阅读页是 edge-to-edge（`setDecorFitsSystemWindows(false)`），工具栏一显示就同时把
+     * 系统导航栏叫出来（[showSystemChrome]）—— 底栏内容不抬到它上面就会被整条盖住，
+     * 点按会落到系统的返回/主页/多任务键上（三键导航机型尤其明显）。
+     */
+    private val navigationBarInsetBottomPx = mutableIntStateOf(0)
+
+    /**
      * 键盘顶 inset（物理 px，随键盘进/出场动画逐帧更新，物理键盘不参与）。
      *
      * 这个窗口是 `adjustNothing`：系统**不派发静态 IME insets**（`WindowInsets.ime` 恒为 0，
@@ -272,6 +281,9 @@ class ReaderActivity : ComponentActivity() {
                     runningAnimations: MutableList<WindowInsetsAnimationCompat>,
                 ): WindowInsetsCompat {
                     statusInsetTopPx.intValue = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+                    // 导航栏与状态栏同属 systemBars 动画：逐帧同步，底栏跟着系统栏一起升降，不先压一下再跳。
+                    navigationBarInsetBottomPx.intValue =
+                        insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
                     // 只有键盘自己在动时才写这个值：顺带动画（如系统栏）里 getInsets(ime) 是静态值，
                     // 而这个窗口 `adjustNothing` 根本不派发静态 IME insets（恒 0），写进去会把卡片打回屏幕底。
                     if (runningAnimations.any { it.typeMask and WindowInsetsCompat.Type.ime() != 0 }) {
@@ -282,6 +294,14 @@ class ReaderActivity : ComponentActivity() {
                 }
             },
         )
+        // 静态兜底：系统栏显隐结束、转屏、分屏等不一定走上面的逐帧回调（API 30 以下也没有逐帧回调），
+        // 这里在 insets 变化时补一次，避免底栏让位量停在旧值上。
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
+            statusInsetTopPx.intValue = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            navigationBarInsetBottomPx.intValue =
+                insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            insets
+        }
 
         setContent {
             OrilumnTheme {
@@ -364,7 +384,7 @@ class ReaderActivity : ComponentActivity() {
                     Logger.w(TAG, "viewport changed -> whole-book relayout ${pxW}x${pxH}")
                     // 重建已由 configChanges 接管，不走这里；但系统栏高度可能随横竖变化，
                     // 静态 inset 在此刷新（与 create/resume 同口径），否则内容偏移沿用旧值。
-                    syncStatusInset()
+                    syncSystemInsets()
                     relayoutPending = false
                     val liveLoop = relayoutJob
                     val p = currentPos
@@ -406,6 +426,10 @@ class ReaderActivity : ComponentActivity() {
                     host = snapshot,
                     settings = effective,
                     statusBarInset = with(LocalDensity.current) { (statusInsetTopPx.intValue / density).dp },
+                    // 底栏让位：工具栏可见时导航栏也显示，阅读页 edge-to-edge，不抬上去就被盖住。
+                    navigationBarInset = with(LocalDensity.current) {
+                        (navigationBarInsetBottomPx.intValue / density).dp
+                    },
                     // 键盘高度只能从动画回调里拿（本窗口 adjustNothing，静态 IME insets 恒 0）。
                     // API 30 以下系统不派发逐帧回调，交回共享层读系统 insets（与旧行为一致）。
                     imeInset = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -1098,16 +1122,17 @@ class ReaderActivity : ComponentActivity() {
         else hideSystemChrome()
     }
 
-    /** 同步当前状态栏 inset（动画回调之外的静态时刻，如 create/resume）。 */
-    private fun syncStatusInset() {
-        statusInsetTopPx.intValue =
-            ViewCompat.getRootWindowInsets(window.decorView)
-                ?.getInsets(WindowInsetsCompat.Type.statusBars())?.top ?: 0
+    /** 同步当前状态栏/导航栏 inset（动画回调之外的静态时刻，如 create/resume/转屏）。 */
+    private fun syncSystemInsets() {
+        val insets = ViewCompat.getRootWindowInsets(window.decorView) ?: return
+        statusInsetTopPx.intValue = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+        navigationBarInsetBottomPx.intValue =
+            insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
     }
 
     /** 栏显示：状态栏 + 底部手势栏可见（controller.show，edge-to-edge 下唯一可靠路径）。 */
     private fun showSystemChrome() {
-        syncStatusInset()
+        syncSystemInsets()
         @Suppress("DEPRECATION")
         window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
         window.statusBarColor = Color.TRANSPARENT
@@ -1118,7 +1143,7 @@ class ReaderActivity : ComponentActivity() {
 
     /** 栏隐藏（阅读中）：controller.hide 为主（手势 pill 唯一可靠路径），legacy 标志位兼顾旧 ROM。 */
     private fun hideSystemChrome() {
-        syncStatusInset()
+        syncSystemInsets()
         val c = barsController()
         c.hide(WindowInsetsCompat.Type.systemBars())
         @Suppress("DEPRECATION")
@@ -1135,9 +1160,9 @@ class ReaderActivity : ComponentActivity() {
     /**
      * 同步系统栏**图标明暗**（不碰显隐、不触发动画）。
      *
-     * 判据按**实际底色**而不是 `scheme`：夜间底色必暗（`TypographicProfile` 保证），但 `day` 分支的
-     * 底色就是 `bgOverride` 原值 —— 用户用滑块调深或存深色预设时底色是暗的而 `scheme` 仍是 `day`，
-     * 判「深色图标」就画在暗底上、看不见。判据单源在 `TypographicProfile.wantsLightBarIcons`。
+     * 工具栏可见时，系统状态栏/导航栏覆盖在应用自己的深色工具栏上（BarBg），
+     * 图标必须固定用浅色；工具栏隐藏时系统栏也隐藏，但边缘滑动会临时露出在阅读内容上，
+     * 这时按阅读内容的实际底色判定（单源 [TypographicProfile.wantsLightBarIcons]）。
      *
      * **为什么单独成函数、不并进 show/hide**：设置面板里拖背景色滑块会逐帧走 [liveApply]，
      * 若那里调 `applySystemBars()` 就会反复 show/hide 系统栏 ⇒ 栏抖 + 每帧触发显隐动画。
@@ -1145,7 +1170,9 @@ class ReaderActivity : ComponentActivity() {
      * 于是拖滑块绝大多数帧零 native 调用。
      */
     private fun syncBarIconTone() {
-        val light = TypographicProfile.wantsLightBarIcons(effective)
+        val overAppBar = barsVisible && !settingsOpen && panelPage == null
+        // overAppBar: 应用工具栏底色固定为深色，只能用浅色图标（false = light icons）。
+        val light = if (overAppBar) false else TypographicProfile.wantsLightBarIcons(effective)
         if (light == barsLightToneApplied) return
         barsLightToneApplied = light
         barsController().apply {
@@ -1155,12 +1182,11 @@ class ReaderActivity : ComponentActivity() {
     }
 
     /**
-     * 上次已施加到系统栏的图标明暗（true = 浅底深色图标）。
-     *
-     * **初值取反**（`false` 而实际多半是 `true`）：保证 [syncBarIconTone] 首次必落一次 native 设置，
-     * 否则「首次恰好等于初值」的组合会漏设、图标停在系统默认（跟随系统主题）上。
+     * 上次已施加到系统栏的图标明暗（true = 浅底深色图标）。`null` = 尚未施加过，
+     * 保证首次同步必落一次 native 设置；不能用固定 Boolean 初值，否则目标值恰好相等时
+     * 会被去重吞掉（深色底要浅色图标时 `false == false` 就会漏设）。
      */
-    private var barsLightToneApplied = false
+    private var barsLightToneApplied: Boolean? = null
 
     /** 系统栏控制器：transient 模式——边缘滑动临时 peek 后自动回藏，不与应用工具栏状态打架。 */
     private fun barsController(): WindowInsetsControllerCompat =

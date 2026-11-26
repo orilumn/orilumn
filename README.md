@@ -71,14 +71,14 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 
 | 平台 | 构建文件 | 实测 | 下载 |
 |---|---|---|---|
-| Android 7.0+ 平板 | `orilumn-<版本>-android.apk` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/orilumn-0.5.12-android.apk) |
-| Windows | `Orilumn-<版本>-windows-x64.msi` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-windows-x64.msi) |
-| macOS Intel | `Orilumn-<版本>-macos-x64.dmg` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-macos-x64.dmg) |
-| Linux · Debian / Ubuntu | `Orilumn-<版本>-linux-x64.deb` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.deb) |
-| Linux · Arch / EndeavourOS | `Orilumn-<版本>-linux-x64.pkg.tar.zst` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.pkg.tar.zst) |
-| Linux · Fedora / openSUSE | `Orilumn-<版本>-linux-x64.rpm` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.rpm) |
-| macOS Apple Silicon | `Orilumn-<版本>-macos-arm64.dmg` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-macos-arm64.dmg) |
-| 其他 Linux 发行版 / 桌面环境 | `Orilumn-<版本>-linux-x64.AppImage` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.12-linux-x64.AppImage) |
+| Android 7.0+ | `orilumn-<版本>-android.apk` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/orilumn-0.5.13-android.apk) |
+| Windows | `Orilumn-<版本>-windows-x64.msi` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-windows-x64.msi) |
+| macOS Intel | `Orilumn-<版本>-macos-x64.dmg` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-macos-x64.dmg) |
+| Linux · Debian / Ubuntu | `Orilumn-<版本>-linux-x64.deb` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-linux-x64.deb) |
+| Linux · Arch / EndeavourOS | `Orilumn-<版本>-linux-x64.pkg.tar.zst` | ✅ 实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-linux-x64.pkg.tar.zst) |
+| Linux · Fedora / openSUSE | `Orilumn-<版本>-linux-x64.rpm` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-linux-x64.rpm) |
+| macOS Apple Silicon | `Orilumn-<版本>-macos-arm64.dmg` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-macos-arm64.dmg) |
+| 其他 Linux 发行版 / 桌面环境 | `Orilumn-<版本>-linux-x64.AppImage` | ⚠️ 未实测 | [点此下载](https://github.com/orilumn/orilumn/releases/latest/download/Orilumn-0.5.13-linux-x64.AppImage) |
 
 > ###### 备注
 > “支持”= 能构建出该平台产物；“实测”= 本项目作者真正在对应平台上跑过。其余组合可以跑，但没有验证过，不保证可用。因为作者没有实机，新版 macOS 的触屏功能暂不支持。
@@ -104,7 +104,6 @@ Orilumn 阅读器就是为了解决以上种种问题而开发的。之前，为
 - 增加 $\LaTeX$ 支持；
 - 增加五线谱支持（需调研可行性）；
 - 支持 SVG；
-- 安卓手机屏幕个性化调整；
 - 后台任务调度视实际情况提升到应用级；
 - 增加 OPDS 书库支持；
 - 书架分组管理；

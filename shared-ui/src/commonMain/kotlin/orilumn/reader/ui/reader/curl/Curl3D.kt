@@ -343,18 +343,15 @@ internal fun DrawScope.drawCurl3DFrame(
             drawSheetShade(sheetOutline, mesh, shadeFrom, lastRow, radius, t0, up)
         }
         // 起点 = **纸背刚露头**：网格里已经有了 `Verso`（纸卷外圈那半段，纸背朝上）就画，
-        // 不必等平铺段。定朝外仍然优先用平铺段的扫线行，还没有平铺段时退回用 `Verso` 那半段。
-        //
-        // 平铺段**刚出现那一两行不算数**（见 [SHADOW_SEED_MIN_ROWS]）：那时它只是纸卷拐角上
-        // 挤在一起的几条扫线，弦长从几百像素掉到零，投票等于抛硬币 —— 抛错一次，整条影带
-        // 就翻到页边另一侧。退回 `Verso` 那半段的票反而稳。
-        val seedRows = mesh.shadowSeedRows()
-        if (edges != null && seedRows != null && taperFrom != null) {
+        // 不必等平铺段。朝外由材料坐标定（见 [outwardNormals]），不再按平铺段的弦投票。
+        if (edges != null && taperFrom != null) {
             // 影宽的斜坡铺向**最远的纸角**那一头；折痕几乎竖直时，扫线从哪个页角出界会随
             // 倾斜的正负换一头（屏幕上下两端的宽度整段对调）。所以斜坡的陡度按倾斜渐变。
             drawBackEdgeShadow(
+                mesh,
+                shape,
+                radius,
                 edges,
-                seedRows,
                 taperFrom,
                 backShadowWidth,
                 backShadowAlpha,
@@ -437,20 +434,6 @@ internal fun CurlMesh.backCorners(): List<Offset>? {
 }
 
 /**
- * 投票「哪边朝外」用的扫线行：**平铺纸背**那一段（够厚才算），没有就退回纸卷外圈那半段
- * （`Verso`）；两者都没有时返回 `null`（这一帧还没有纸背可落影）。
- *
- * 平铺段刚露头那一两行不算数，理由见 [SHADOW_SEED_MIN_ROWS]。
- */
-internal fun CurlMesh.shadowSeedRows(): IntRange? {
-    val back = bands.firstOrNull {
-        it.surface == CurlMesh.Surface.Back && it.lastRow - it.firstRow + 1 >= SHADOW_SEED_MIN_ROWS
-    }
-    val band = back ?: bands.firstOrNull { it.surface == CurlMesh.Surface.Verso } ?: return null
-    return band.firstRow..band.lastRow
-}
-
-/**
  * 纸背两条页边的落影：每条页边一条**只铺纸外一侧**的软带。
  *
  * 两条页边都是 `折痕端 → 最远的纸角`，**各铺一条**。两条边的末点重合（斜折痕切掉一个页角）时，
@@ -459,8 +442,9 @@ internal fun CurlMesh.shadowSeedRows(): IntRange? {
  *
  * **只铺朝外那一侧**：判「整条影该往哪边铺」不能逐点看点乘 —— 纸卷成一圈后，同一块屏幕范围里
  * 叠着纸卷正反两面，重心、轮廓绕向、甚至页边法向在卷起来那截都会给出相反答案；页边斜时扫线
- * 与页边不垂直，纸角附近两者几乎平行，逐点判还会翻向。这里改成「朝外连续」：在**平铺纸背**
- * 那一段投票定下朝外，再沿折线传递（见 [outwardNormals]）。
+ * 与页边不垂直，纸角附近两者几乎平行，逐点判还会翻向。朝外由**材料坐标**定（见 [outwardNormals]）：
+ * 纸边本身是哪一条页边（左/右/上/下）在材料里是确定的，把它的外法向经网格的映射投到屏幕上，
+ * 得到的就是「背离纸面」的那一侧。
  *
  * 影带**画在所有纸段之后**（见 [drawCurl3DFrame] 画序）：只铺朝外一侧不会落到纸背上，而卷起来
  * 那截的朝外区域正好被圆柱远侧的纸投在身上，画在纸之前就会被盖掉 —— 读者判「阴影被卷筒截断」。
@@ -473,13 +457,12 @@ internal fun CurlMesh.shadowSeedRows(): IntRange? {
  * 一个线性渐变的等值线没法跟着弯，外沿会留一道能看见的硬边。
  *
  * @param edges 两条页边（都是 `折痕端 → 最远的纸角`）。
- * @param backRows 投票「朝外」用的扫线行：平铺纸背那一段（`Back` 段）最可信——那里同一扫线
- *   上两个端点都在一张平铺的纸上，连线一定穿过纸面；还没有平铺段的帧（纸背刚露头、没绕满半圈）
- *   退回用纸卷外圈那半段（`Verso`）。
  */
 internal fun DrawScope.drawBackEdgeShadow(
+    mesh: CurlMesh,
+    shape: CurlShape,
+    radius: Float,
     edges: List<List<Offset>>,
-    backRows: IntRange,
     taperFrom: Int,
     maxWidth: Float,
     alpha: Float,
@@ -490,8 +473,8 @@ internal fun DrawScope.drawBackEdgeShadow(
     val second = edges[1]
     if (first.size < 2 || second.size < 2) return
     if (first.size != second.size) return
-    val edge1 = sampleShadowEdge(first, second, backRows, taperFrom) ?: return
-    val edge2 = sampleShadowEdge(second, first, backRows, taperFrom) ?: return
+    val edge1 = sampleShadowEdge(mesh, shape, radius, 0, first, taperFrom) ?: return
+    val edge2 = sampleShadowEdge(mesh, shape, radius, 1, second, taperFrom) ?: return
     val n = edge1.pts.size
     // 一条图层路径在整个影里复用（每层 reset 后重填）：一帧一个 `Path`，不再一帧几十个。
     val path = Path()
@@ -521,14 +504,16 @@ private class ShadowEdge(
 )
 
 /**
- * 把一条页边（连同同一扫线行上的另一条）采成 [ShadowEdge]；算不出来时返回 `null`。
+ * 把一条页边采成 [ShadowEdge]；算不出来时返回 `null`。
  *
- * 两条边**同一行同一行地对**：[outwardNormals] 是按行比较两条边的，两边必须一样长。
+ * @param edgeIndex 0 / 1，这条页边是网格每行的第一个还是第二个端点（材料坐标按它取）。
  */
 private fun sampleShadowEdge(
+    mesh: CurlMesh,
+    shape: CurlShape,
+    radius: Float,
+    edgeIndex: Int,
     edge: List<Offset>,
-    other: List<Offset>,
-    backRows: IntRange,
     fromRow: Int,
 ): ShadowEdge? {
     // 只留「收到哪儿为止」那一行及其之后：之前是绕筒退回折痕的钩子，不铺影。
@@ -545,8 +530,8 @@ private fun sampleShadowEdge(
     }
     if (cum < 1f) return null
     for (i in 0 until n) tAt[i] /= cum
-    // 朝外仍按整条页边投票：投票问的是「纸在哪一侧」，与影收到哪儿无关。
-    val outwardAll = outwardNormals(edge, other, backRows) ?: return null
+    // 朝外由**材料坐标**定（见 [outwardNormals]），与影收到哪儿无关。
+    val outwardAll = outwardNormals(mesh, shape, radius, edgeIndex, edge, from) ?: return null
     return ShadowEdge(pts, tAt, Array(n) { outwardAll[from + it] })
 }
 
@@ -656,31 +641,52 @@ internal fun shadowTaperBias(lean: Float, fade: Float): Float {
 internal fun shadowWidthProfile(t: Float, taperBias: Float): Float = 1f - taperBias * (1f - t)
 
 /**
- * 页边每一点的**朝外法向**（背离纸背）：先把折线每点的法向取出来，再让「朝外」沿着折线
- * 连续地传下去。
+ * 页边每一点的**朝外法向**（背离纸面）。
  *
- * **在哪一行定朝外**最好取平铺纸背那一段（[seedRows]）：那里同一扫线上的两个端点都在
- * 一张平铺的纸上，连线一定穿过纸面，「另一端在哪一侧」才可信。还没有平铺段（纸背刚露头、
- * 没绕满半圈）的帧退一步用纸卷外圈那半段（`Verso`）—— 那一截两端隔着筒壁，投影后偶尔是反的，
- * 但整段投票是多数对；折痕端那一行是唯一的例外，它的「两端」是整条折痕（纸对角），
- * 所以只让它算一票，靠多数压掉。
+ * ## 朝外由材料坐标定，不投票
  *
- * 投票取整段的多数，不只看一行：某一行恰好退化（纸角附近扫线几乎与页边平行）时，
- * 单行会被一个几乎零投影的噪声定死。票数只看「另一端在法向的哪一侧」，与扫线有多斜无关；
- * 两端在屏幕上挤到一起的行干脆不投（见 [SHADOW_VOTE_MIN_CHORD]）。
+ * 每条页边都是页面矩形某一条边的投影（折痕斜时一条页边折线可能跨过页角、接上另一条边，
+ * 但每一行落在哪条材料边上由 `texCoords` 直接给出）。材料边只有四条，外法向是常数：
+ * 左 `(-1,0)`、右 `(1,0)`、上 `(0,-1)`、下 `(0,1)`。把它经网格的映射投到屏幕上：
  *
- * 定下之后不再逐点看点乘：朝外是一个**连续**的量，相邻两点的法向不可能突然掉头。
- * 卷起来那截页边在屏幕上会掉头（圆柱投影不是单射），切线翻向，法向公式也跟着翻，
- * 正好靠这条连续性保持朝外不变 —— 但**只认真正的掉头**：折线在纸角上拐直角时切线转了 90°，
- * 那不是掉头，法向自己已经跟着转过去了（见 [SHADOW_OUTWARD_REVERSAL]）。
+ * ```
+ *   J·m = n·off'(x')·(m·n) + t·(m·t)
+ * ```
  *
- * @param seedRows 投票用的扫线行：优先平铺纸背那一段，没有就退回纸卷外圈那半段。
- *   平铺段只有一两行时由调用方先换成 `Verso`（见 [SHADOW_SEED_MIN_ROWS]）。
+ * 其中 `n` 是折痕法向、`t` 沿折痕，`off'` 是卷曲偏移的导数（平面段 1、圆筒段 `cos(x'/R)`、
+ * 绕满半圈后 `-1`）。影只从卷筒俯视图投影线（`x' = -πR/2`）之后开始画，那一整段 `off' ≤ 0`。
+ *
+ * 早先这里是「在平铺纸背那一段投票」。投票用的是同一扫线两端的连线方向，而纸角附近
+ * 两条页边在屏幕上挤成一点、连线短到几像素，方向全是噪声：右下角折起时平铺段只有两三行、
+ * 弦长全在阈值以下，票数为零、符号取默认值，整条**右侧竖页边**的影就翻到纸上，再拖一段、
+ * 平铺段长出来又翻回去 —— 读者说的「竖着的页边阴影画到了错误的一侧，再拖又正常」正是它。
+ * 材料坐标没有这个问题：它问的是「这一行在哪条页边上」，与弦长无关。
+ *
+ * ## 材料边逐行走，不把符号一竿子传到底
+ *
+ * 一条页边折线在纸角上会接上**另一条**材料边：右下角折起时，沿底边走的折线绕过页角后
+ * 改沿右边走，两段的外法向差 90°。所以每一行取**它自己**那条材料边。页角那一行材料边
+ * 不明确（两条边同时成立），沿用上一行的材料边 —— 影带先沿原边走到角上，角外那一楔
+ * 交给扇形补（[drawCornerFan]）。
+ *
+ * 页边在屏幕上被压扁时（投影后几乎顺着法向），材料外法向与折线法向的夹角接近 90°，
+ * 这一行的符号是噪声，也沿用上一行（见 [SHADOW_MATERIAL_MIN_COS]）。
+ *
+ * 材料页角上折线会在屏幕上**掉头**（圆柱投影不是单射，两条材料边在屏幕上折回来）。掉头那一行
+ * 恰好就是材料边不明确的那一行，它沿用上一行的符号，`base` 又已经反向，所以 `out` 在那里会
+ * 跳 180°。那一行是纸角本身、探出页面外，被画布裁掉，看不见（实测 1840×2800 与 400×600 的
+ * 1322 个右下角跟手帧，跳变点全在页面外 18–90px）；看得见的每条材料边上，影带都连续。
+ *
+ * @param edgeIndex 0 / 1，这条页边是网格每行的第一个还是第二个端点。
+ * @param fromRow 影从哪一行开始（卷筒俯视图投影线）；只在这一行之后找起始行。
  */
 internal fun outwardNormals(
+    mesh: CurlMesh,
+    shape: CurlShape,
+    radius: Float,
+    edgeIndex: Int,
     edge: List<Offset>,
-    other: List<Offset>,
-    seedRows: IntRange,
+    fromRow: Int,
 ): Array<Offset>? {
     val n = edge.size
     if (n < 2) return null
@@ -692,69 +698,101 @@ internal fun outwardNormals(
         val len = hypot(dx, dy)
         if (len < 1e-3f) Offset.Zero else Offset(dy / len, -dx / len)
     }
-    val lo = seedRows.first.coerceIn(0, n - 1)
-    val hi = seedRows.last.coerceIn(lo, n - 1)
-    var vote = 0.0
-    for (i in lo..hi) {
-        if (base[i] == Offset.Zero) continue
-        val row = other[i] - edge[i]
-        val len = hypot(row.x, row.y)
-        // 两端在屏幕上挤在一起的行（纸角、卷筒切线附近）不投票：单位化以后就是噪声。
-        if (len < SHADOW_VOTE_MIN_CHORD) continue
-        vote += (base[i].x * row.x + base[i].y * row.y) / len
-    }
-    // 起点取平铺段中间：两头的角点扫线会退化成一个点，法向不可用。
-    var start = (lo + hi) / 2
-    if (base[start] == Offset.Zero) {
-        start = -1
-        for (dx in 1..(hi - lo)) {
-            val a = (lo + hi) / 2 + dx
-            val b = (lo + hi) / 2 - dx
-            if (a in lo..hi && base[a] != Offset.Zero) {
-                start = a
-                break
-            }
-            if (b in lo..hi && base[b] != Offset.Zero) {
-                start = b
-                break
-            }
+    val lo = fromRow.coerceIn(0, n - 1)
+    // 折痕坐标系：与 [buildCurlMesh] 同一套。
+    val pageH = shape.pageH
+    val foldLen = hypot(shape.bottomX - shape.topX, pageH).coerceAtLeast(1e-3f)
+    val tx = (shape.bottomX - shape.topX) / foldLen
+    val ty = pageH / foldLen
+    val nx = ty
+    val ny = -tx
+    val halfTurn = PI.toFloat() * radius
+    val signAt = FloatArray(n) { i ->
+        if (base[i] == Offset.Zero) {
+            Float.NaN
+        } else {
+            materialOutwardSign(mesh, shape, radius, edgeIndex, i, base[i], nx, ny, tx, ty, halfTurn)
         }
     }
+    // 起始行：影的范围内第一条材料边可靠的行；范围内一条都没有就往前找一条。
+    var start = -1
+    for (i in lo until n) if (!signAt[i].isNaN()) { start = i; break }
+    if (start < 0) for (i in lo - 1 downTo 0) if (!signAt[i].isNaN()) { start = i; break }
     if (start < 0) return null
-    // `vote > 0` ⇒ 法向指向纸面（另一个端点那一侧）⇒ 朝外取反。
-    //
-    // 传下去的是**一个符号**，不是「和上一点同向」：法向本身已经跟着折线转弯了，只有折线在
-    // 屏幕上**掉头**（切线反向，圆柱投影不是单射）才需要翻符号。按「和上一点同向」判会把
-    // 90° 转弯也当成掉头 —— 页角那几行扫线正好在直角上拐弯，点乘在 0 附近随机取证，
-    // 倾斜差千分之一就会翻，读者看到的就是「影带在竖直页边左右来回切换」。
-    val seedSign = if (vote > 0.0) -1f else 1f
     val out = Array(n) { Offset.Zero }
-    fun walk(from: Int, to: Int, step: Int, fallback: (Int) -> Offset) {
-        var sign = seedSign
-        var prev = from
-        out[from] = base[from] * sign
-        var i = from + step
+    fun walk(from: Int, to: Int, step: Int, initial: Float, fallback: (Int) -> Offset) {
+        var sign = initial
+        var i = from
         while (i != to) {
             if (base[i] == Offset.Zero) {
                 out[i] = fallback(i)
-                i += step
-                continue
+            } else {
+                val s = signAt[i]
+                if (!s.isNaN()) sign = s
+                out[i] = base[i] * sign
             }
-            // 行与行在屏幕上挤在一起时（页角的几条扫线差不到一像素），切线本身就是噪声，
-            // 不拿它判掉头；隔开几像素再比。
-            if ((edge[i] - edge[prev]).getDistance() >= SHADOW_ROW_MIN_STEP) {
-                if (base[prev].x * base[i].x + base[prev].y * base[i].y < SHADOW_OUTWARD_REVERSAL) {
-                    sign = -sign
-                }
-                prev = i
-            }
-            out[i] = base[i] * sign
             i += step
         }
     }
-    walk(start, n, 1) { out[it - 1] }
-    walk(start, -1, -1) { out[it + 1] }
+    walk(start, n, 1, signAt[start]) { out[it - 1] }
+    walk(start - 1, -1, -1, signAt[start]) { out[it + 1] }
     return out
+}
+
+/**
+ * 某一行的材料外法向投到屏幕上之后，与折线法向 [base] 同号还是反号；不可靠时返回 NaN。
+ *
+ * 页角上两条材料边同时成立，外法向差 90°，那里交给纸角扇形去补，不在这里取。
+ * 页边在屏幕上压扁到几乎顺着法向时，两者的夹角接近 90°、符号是噪声，也不在这里取。
+ */
+private fun materialOutwardSign(
+    mesh: CurlMesh,
+    shape: CurlShape,
+    radius: Float,
+    edgeIndex: Int,
+    row: Int,
+    base: Offset,
+    nx: Float,
+    ny: Float,
+    tx: Float,
+    ty: Float,
+    halfTurn: Float,
+): Float {
+    val eps = 0.75f
+    val u = mesh.texCoords[row * 4 + edgeIndex * 2]
+    val v = mesh.texCoords[row * 4 + edgeIndex * 2 + 1]
+    val onLeft = u <= eps
+    val onRight = u >= shape.pageW - eps
+    val onTop = v <= eps
+    val onBottom = v >= shape.pageH - eps
+    val horizontal = if (onLeft || onRight) 1 else 0
+    val vertical = if (onTop || onBottom) 1 else 0
+    if (horizontal + vertical != 1) return Float.NaN
+    val mx = when {
+        onLeft -> -1f
+        onRight -> 1f
+        else -> 0f
+    }
+    val my = when {
+        onTop -> -1f
+        onBottom -> 1f
+        else -> 0f
+    }
+    val xArc = -mesh.arc[row * 2]
+    val off = when {
+        xArc >= 0f -> 1f
+        xArc >= -halfTurn -> cos(xArc / radius)
+        else -> -1f
+    }
+    val alongN = mx * nx + my * ny
+    val alongT = mx * tx + my * ty
+    val sx = off * alongN * nx + alongT * tx
+    val sy = off * alongN * ny + alongT * ty
+    val len = hypot(sx, sy)
+    if (len < 1e-3f) return Float.NaN
+    val cos = (base.x * sx + base.y * sy) / len
+    if (abs(cos) < SHADOW_MATERIAL_MIN_COS) return Float.NaN
+    return if (cos > 0f) 1f else -1f
 }
 
 /**
@@ -1325,40 +1363,12 @@ private const val SHADOW_TAPER_LAYERS: Int = 16
 private const val SHADOW_FAN_STEPS: Int = 12
 
 /**
- * 页边朝外法向沿折线传递时，判定「折线在屏幕上掉头了」的点乘阈值。
+ * 材料外法向与折线法向的**最小夹角余弦**：低于它这一行的符号算噪声，沿用上一行。
  *
- * 相邻两行的法向点乘 = 切线点乘：真掉头（圆柱投影不是单射，页边在屏幕上折回来）接近 -1，
- * 纸角上拐直角则是 0。**只有超过这个阈值才算掉头、才翻符号**；把 0 附近也算成掉头的话，
- * 纸角那几行（扫线正好在直角拐弯处、连线在屏幕上压成几个像素）就会随机翻 ——
- * 读者看到的是「影带在竖直页边左右来回切换」，倾斜差千分之一就切一次。
+ * 页边在屏幕上被压扁（投影后几乎顺着法向）时，投影出来的外法向与折线法向接近垂直，
+ * 点乘在 0 附近，倾斜千分之一就换号。这类行不取自己的符号，靠前后行把它连起来。
  */
-private const val SHADOW_OUTWARD_REVERSAL: Float = -0.5f
-
-/**
- * 判「掉头」时隔开的屏幕最小行距（px）。
- *
- * 页角那几条扫线在屏幕上差不到一像素（纸角被斜折痕切掉时更是挤成一点），切线方向全是噪声，
- * 偏偏它们又能凑出一次「掉头」的点乘，一路把后面整段影带翻到另一边去。隔开几像素再判，
- * 噪声就进不来了。
- */
-private const val SHADOW_ROW_MIN_STEP: Float = 2f
-
-/**
- * 投票「哪边朝外」时，平铺纸背那一段至少要占几行。
- *
- * 平铺段是刚绕满半圈的那一两行：弦长从几百像素一路掉到零，行与行在屏幕上只差零点几像素，
- * 票数是 ±1 起的噪声。让它投票，符号会随倾斜千分之一来回翻，整条影带跟着在页边两侧跳。
- * 不够这个行数就退回纸卷外圈那半段（`Verso`）。
- */
-private const val SHADOW_SEED_MIN_ROWS: Int = 3
-
-/**
- * 投票时同一扫线两端的**最小屏幕间距**（px）：比这还近的行不投票。
- *
- * 纸角上那几条扫线、卷筒切线附近的行，两条页边在屏幕上只隔几个像素，连线方向被抗锯齿
- * 与亚像素位置定死。单位化之后它们的票和最可信的行一样重，三五行噪声就能压过几百行真信号。
- */
-private const val SHADOW_VOTE_MIN_CHORD: Float = 8f
+private const val SHADOW_MATERIAL_MIN_COS: Float = 0.2f
 
 /**
  * 影宽那把斜坡「按倾斜渐变」的倾斜范围（0 = 竖直，1 = 斜到极限）。

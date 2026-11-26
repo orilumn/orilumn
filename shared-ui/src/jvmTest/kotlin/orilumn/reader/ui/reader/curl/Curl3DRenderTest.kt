@@ -911,12 +911,28 @@ class Curl3DRenderTest {
                 var keptChecked = 0
                 for (k in 0..1) {
                     val edge = edges[k]
-                    val outward = outwardNormals(edge, edges[1 - k], back.firstRow..back.lastRow) ?: continue
+                    val outward = outwardNormals(mesh, shape, radius, k, edge, taperFrom!!) ?: continue
                     // 收尾之前（绕筒退回折痕的钩子）：不许有影。
+                    //
+                    // 采样点取**影带那一侧**，不是钩子那一行自己的材料外法向：纸绕过筒顶之后
+                    // 材料外法向已经跟着翻面、指回正面那一侧，而正面那一侧本来就有纸卷的落影
+                    // （那是另一条影，收尾之前就该在）。影带从收尾那一行起铺，所以侧别按收尾
+                    // 那一行定，钩子各行沿自己的折线法向偏移。
+                    fun normalAt(e: List<Offset>, at: Int): Offset {
+                        val a = e[maxOf(at - 1, 0)]
+                        val b = e[minOf(at + 1, e.size - 1)]
+                        val dx = b.x - a.x
+                        val dy = b.y - a.y
+                        val len = hypot(dx, dy)
+                        return if (len < 1e-3f) Offset.Zero else Offset(dy / len, -dx / len)
+                    }
+                    val band = outward[taperFrom]
+                    val taperNormal = normalAt(edge, taperFrom)
+                    val bandSign = if (taperNormal.x * band.x + taperNormal.y * band.y >= 0f) 1f else -1f
                     var i = 4
-                    while (i <= taperFrom!! - 3) {
+                    while (i <= taperFrom - 3) {
                         val at = edge[i]
-                        val o = outward[i]
+                        val o = normalAt(edge, i) * bandSign
                         val x = (at.x + o.x * 6f).roundToInt()
                         val y = (at.y + o.y * 6f).roundToInt()
                         if (x < 2 || x > w - 3 || y < 2 || y > h - 3 || luma(off, x, y) < 0.9f) {
@@ -1485,16 +1501,16 @@ class Curl3DRenderTest {
                     val radius = curlRadius(shape)
                     val mesh = buildCurlMesh(shape, radius)
                     val edges = mesh.pageEdges() ?: break
-                    val seed = mesh.shadowSeedRows()
+                    val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
                     val flatTurn = PI.toFloat() * radius
                     val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
                     val width = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
                     val last = edges[0].size - 1
                     // 只量「两条页边在纸角上相交」的帧：那是扇形在场、也是翻边最刺眼的形状。
-                    val corner = seed != null && (edges[0][last] - edges[1][last]).getDistance() < 0.5f
+                    val corner = taperFrom != null && (edges[0][last] - edges[1][last]).getDistance() < 0.5f
                     if (corner && width >= 6f) {
-                        val n0 = outwardNormals(edges[0], edges[1], seed!!)
-                        val n1 = outwardNormals(edges[1], edges[0], seed)
+                        val n0 = outwardNormals(mesh, shape, radius, 0, edges[0], taperFrom)
+                        val n1 = outwardNormals(mesh, shape, radius, 1, edges[1], taperFrom)
                         if (n0 != null && n1 != null) {
                             // 扇形两条边的叉积符号 = 铺向折角外的那一楔在纸边的哪一侧。
                             val cross = n0[last].x * n1[last].y - n0[last].y * n1[last].x
@@ -1516,6 +1532,63 @@ class Curl3DRenderTest {
             }
         }
         assertTrue("一帧都没量到，测试没测到东西", total > 100)
+    }
+
+    /**
+     * 右下角跟手翻页：屏幕上竖直的右侧页边，影必须始终在它的左侧。
+     *
+     * 读者的原话：「从右下角跟手翻起时，拖到某个位置，竖直页边那条影画到了错误的一侧，
+     * 再拖一段又正常」。根由是旧版在平铺纸背那一段投票定朝外：右下角折起时平铺段只有两三行、
+     * 两条页边在屏幕上挤成一点，弦长全在阈值以下，票数为零、符号取默认值，整条竖边的影翻到纸上。
+     *
+     * 锁法：在设备页尺寸上把右下角往左上一路拖，取材料右边（`u = 页宽`）、屏幕上近似竖直
+     * （切线 `|dy|/len ≥ 0.85`）且落在页面右半边的行，朝外法向必须指左（`out.x < 0`）；
+     * 同一条看得见的页边上也不许出现 180° 跳变。
+     */
+    @Test
+    fun bottomRightDragKeepsTheVerticalEdgeShadowOnItsLeft() {
+        val w = 1840f
+        val h = 2800f
+        var rows = 0
+        for (toY in 2800 downTo 1400 step 80) {
+            for (toX in 1840 downTo 400 step 80) {
+                val pull = CurlPull(from = Offset(w, h - 10f), to = Offset(toX.toFloat(), toY.toFloat()))
+                val shape = curlFrame(w, h, 0.35f, 1, leanOf(pull, w, h), pull).shape
+                val radius = curlRadius(shape)
+                val mesh = buildCurlMesh(shape, radius)
+                val edges = mesh.pageEdges() ?: continue
+                val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f) ?: continue
+                val last = edges[0].size - 1
+                for (k in 0..1) {
+                    val edge = edges[k]
+                    val out = outwardNormals(mesh, shape, radius, k, edge, taperFrom) ?: continue
+                    for (i in taperFrom until last) {
+                        // 右侧竖页边：材料 u = 页宽。
+                        if (mesh.texCoords[i * 4 + k * 2] < w - 0.75f) continue
+                        val p = edge[i]
+                        if (p.x < w * 0.5f || p.x > w || p.y < 0f || p.y > h) continue
+                        val a = edge[maxOf(i - 1, 0)]
+                        val b = edge[minOf(i + 1, last)]
+                        val len = hypot(b.x - a.x, b.y - a.y)
+                        if (len < 1e-3f || abs(b.y - a.y) / len < 0.85f) continue
+                        rows++
+                        assertTrue(
+                            "to=($toX,$toY) edge=$k row=$i 竖页边的影跑到右侧去了" +
+                                "（out=(${out[i].x},${out[i].y})）",
+                            out[i].x < 0f,
+                        )
+                        if (i + 1 < last && (edge[i + 1] - edge[i]).getDistance() >= 2f) {
+                            val dot = out[i].x * out[i + 1].x + out[i].y * out[i + 1].y
+                            assertTrue(
+                                "to=($toX,$toY) edge=$k row=$i 看得见的竖页边上影带翻了 180°",
+                                dot >= -0.5f,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        assertTrue("一行都没量到，测试没测到东西", rows > 500)
     }
 
     /**

@@ -139,6 +139,12 @@ fun ReaderScreen(
     settings: ReaderSettings,
     statusBarInset: Dp = 0.dp,
     /**
+     * 底栏底部让位（Dp）：工具栏可见时系统导航栏同时显示，阅读页是 edge-to-edge，
+     * 底栏内容必须抬到导航栏之上，否则会被盖住、点按落到系统键上。
+     * 由宿主传系统 insets（隐藏/桌面为 0.dp）；只影响栏/提示，不扣页面视口，避免触发重排。
+     */
+    navigationBarInset: Dp = 0.dp,
+    /**
      * 键盘高度（Dp）：宿主能逐帧报告就传值，传 null 表示「这里读不到，自己去问系统 insets」。
      *
      * Android 阅读页是 `adjustNothing`，系统**不派发静态 IME insets**（`WindowInsets.ime` 恒为 0），
@@ -3694,6 +3700,7 @@ fun ReaderScreen(
             ReaderBars(
                 visible = barsVisible,
                 statusBarInset = statusBarInset,
+                navigationBarInset = navigationBarInset,
                 bookTitle = currentHost.title(),
                 chapterTitle = "",
                 fraction = 0f,
@@ -3726,10 +3733,15 @@ fun ReaderScreen(
                 onTopBarSize = { topBarH = it.height },
                 onBottomBarSize = { botBarH = it.height },
             )
-            BrightnessGestureIndicator(ui = brightnessUi, modifier = Modifier.align(Alignment.BottomCenter))
+            BrightnessGestureIndicator(
+                ui = brightnessUi,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = navigationBarInset),
+            )
             SnackbarHost(
                 hostState = snackbar.hostState,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 56.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 56.dp + navigationBarInset),
             )
         } else if (pos != null) {
             // 进度条口径随页数完整度切换（按页 ↔ 按章）：页数补齐、换参数清空都要立刻反映，
@@ -4537,6 +4549,7 @@ fun ReaderScreen(
             ReaderBars(
                 visible = barsVisible,
                 statusBarInset = statusBarInset,
+                navigationBarInset = navigationBarInset,
                 bookTitle = currentHost.title(),
                 chapterTitle = chapterTitle,
                 fraction = fraction,
@@ -4572,11 +4585,16 @@ fun ReaderScreen(
                 onBottomBarSize = { botBarH = it.height },
             )
             // 亮度手势中的底部滑块。
-            BrightnessGestureIndicator(ui = brightnessUi, modifier = Modifier.align(Alignment.BottomCenter))
+            BrightnessGestureIndicator(
+                ui = brightnessUi,
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = navigationBarInset),
+            )
             // S29：CMP Snackbar（替代 Android Toast）承载占位提示。
             SnackbarHost(
                 hostState = snackbar.hostState,
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 56.dp),
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 56.dp + navigationBarInset),
             )
         } else {
             // 打开中/失败：只显示背页（打开由宿主 suspend 解析，通常瞬时）。

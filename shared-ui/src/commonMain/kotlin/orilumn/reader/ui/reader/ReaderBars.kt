@@ -56,13 +56,15 @@ import kotlin.math.abs
  * 深灰底 #303030，顶部 ‹书架 + 书名 + 章名，底部进度行（上一章/滑动条/百分比/下一章）+ 工具行
  * （目录 / 书签 / 笔记 / 修订 / 审阅 / 夜间 / 设置，图标见 `ReaderBarIcons.kt`）。
  *
- * 平台差异收敛点：原 `statusBarInsetPx`（Android 物理 px）改为 **Dp** [statusBarInset]，由宿主把
- * 系统 insets 换算成 Dp 传入（桌面无状态栏则 0.dp）。其余为纯 CMP。
+ * 平台差异收敛点：原 `statusBarInsetPx`（Android 物理 px）改为 **Dp** [statusBarInset]；
+ * 底部同理给 [navigationBarInset]，让位给系统导航栏（edge-to-edge 下工具栏可见时导航栏也在场）。
+ * 都由宿主把系统 insets 换算成 Dp 传入（桌面/无系统栏则 0.dp）。其余为纯 CMP。
  */
 @Composable
 fun ReaderBars(
     visible: Boolean,
     statusBarInset: Dp = 0.dp,
+    navigationBarInset: Dp = 0.dp,
     bookTitle: String,
     chapterTitle: String,
     fraction: Float,
@@ -208,6 +210,9 @@ fun ReaderBars(
                     if (showNight) BarTool(BarIcons.Moon, "夜间", onNight, active = nightActive)
                     BarTool(BarIcons.Gear, "设置", onSettings)
                 }
+                // 让位放在深灰底之内：底继续铺到屏幕最底（导航栏透明时与它连成一片），
+                // 只把内容整体抬到导航栏上沿之上，避免被系统返回/主页/最近任务键盖住。
+                Spacer(Modifier.height(navigationBarInset))
             }
         }
     }

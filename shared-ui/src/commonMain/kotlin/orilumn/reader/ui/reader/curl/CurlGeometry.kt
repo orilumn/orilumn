@@ -85,8 +85,9 @@ internal data class CurlShape(
      * 折痕倾斜量（正 = 上端 `foldX − lean·tiltW`、下端 `foldX + lean·tiltW`）。
      *
      * 跟手时由 [leanOf] 从拖动方向算出（折痕垂直于手指轨迹；折痕锚点的横向符号由起手
-     * 横滑方向锁住，见 [CurlPull.direction]），也已做扶正（结算跟手交接时翻页用
-     * [settleLeanFade]、回弹用 [settleLeanRewind]，点按用 [tailFade]）/ 跟手时的竖向行程收小。
+     * 横滑方向锁住，横向分母锁在外向行程的最大值上，见 [CurlPull.direction] /
+     * [CurlPull.spanX]），也已做扶正（结算跟手交接时翻页用 [settleLeanFade]、回弹用
+     * [settleLeanRewind]，点按用 [tailFade]）/ 跟手时的竖向行程收小。
      */
     val lean: Float,
     /**
@@ -217,6 +218,18 @@ data class CurlPull(
      * 页边锚点的 `from` 是页右缘，手指永远在它左边（`u_x < 0`），用不到它。
      */
     val direction: Int = 1,
+    /**
+     * 本次手势里**外向**（沿翻页方向）走得最远的那一段横向距离（px，只增不减）。
+     *
+     * 折痕锚点的倾斜分母用它，而不是此刻的 `|u_x|`：手指拖出去再往回收时，`|u_x|` 变大，
+     * `u_y/|u_x|` 跟着变小，折痕会当场转正（读者 2026-11-26：「在屏幕左侧开始翻下一页，
+     * 然后手指往右移动时，折痕会自动转正，平行于屏幕竖边。这是个多余的动作」）。分母锁在
+     * 起手那一趟最远的行程上，收回时折痕只平移、不旋转；竖向移动仍照常改倾斜。
+     *
+     * 0 = 还没锁（用此刻的 `|u_x|`）：起手第一帧、测试与不跟手的调用方都是这个口径。
+     * 页边锚点不用它——它的起点是页右缘，没有「越过按下点」这回事。
+     */
+    val spanX: Float = 0f,
 ) {
     /** 拖动单位方向；位移太小（方向是噪声）时返回 null。 */
     fun unit(): Offset? {
@@ -261,8 +274,22 @@ data class CurlPull(
  *
  * ## 大小
  *
- * 斜率按 `u_y/|u_x|` 算（`u_x ≈ 0` 时不提前返回 0，见下），再乘 `h/(2·tiltW)` 换成倾斜量。
+ * 斜率按 `u_y/|u_x|` 算（折痕锚点收回时用 [CurlPull.spanX]，见下；`u_x ≈ 0` 时不提前返回 0），
+ * 再乘 `h/(2·tiltW)` 换成倾斜量。
  * 纯上下拖方向退化时斜率爆掉，由 [verticalLeanCap] 兜住；纯横向拖 `u_y = 0`，折痕竖直。
+ *
+ * ## 收回时角度不动（折痕锚点）
+ *
+ * 折痕锚点的分母不是此刻的 `|u_x|`，而是**外向行程的最大值**（[CurlPull.spanX]）：
+ *
+ * ```
+ *   lean = direction · (u_y / spanX) · h / (2·tiltW)      （折痕锚点）
+ * ```
+ *
+ * 否则手指往回收、`|u_x|` 变大，折痕会一路转正、最后平行于屏幕竖边——读者 2026-11-26
+ * 报的「多余的动作」。分母只增不减，收回时折痕只平移不旋转；竖向移动仍然照常改倾斜
+ *（2026-11-19 的口径）。起手第一帧 `spanX` 还没锁上，退回用此刻的 `|u_x|`，与旧口径连续。
+ * 页边锚点没有这个动作（`u_x` 从页右缘量起，手指越不过页边），仍用此刻的 `|u_x|`。
  *
  * ## 为什么上限按竖向行程，不按横向
  *
@@ -280,15 +307,21 @@ data class CurlPull(
  * [CurlShape]（两端落在页上下边）的表达范围内。
  */
 internal fun leanOf(pull: CurlPull, pageW: Float, pageH: Float): Float {
-    val u = pull.unit() ?: return 0f
+    val dx = pull.to.x - pull.from.x
+    val dy = pull.to.y - pull.from.y
+    val len = kotlin.math.hypot(dx, dy)
+    if (len < 1f || !len.isFinite()) return 0f
     val w = pageW.coerceAtLeast(1f)
     val h = pageH.coerceAtLeast(1f)
     val tiltW = w * CURL_TILT_WIDTH
-    val ax = kotlin.math.abs(u.x).coerceAtLeast(1e-4f)
     // lean = −u_y/u_x · h/(2·tiltW)。页边锚点的 u_x 恒为负；折痕锚点的 u_x 会越过按下点
-    // 换号，横向符号改用起手那一侧（direction = −sign(起手 u_x)）锁住。
-    val sideways = if (pull.anchor == CurlAnchor.Crease) pull.direction.toFloat() else 1f
-    val wanted = sideways * u.y / ax * h / (2f * tiltW)
+    // 换号，横向符号改用起手那一侧（direction = −sign(起手 u_x)）锁住，横向分母改用
+    // 外向行程的最大值（spanX）——收回时折痕只平移、不转正（见 KDoc）。
+    val crease = pull.anchor == CurlAnchor.Crease
+    val span = if (crease) pull.spanX else 0f
+    val ax = (if (span > 0f) span else kotlin.math.abs(dx)).coerceAtLeast(1e-4f)
+    val sideways = if (crease) pull.direction.toFloat() else 1f
+    val wanted = sideways * dy / ax * h / (2f * tiltW)
     val cap = verticalLeanCap(pull, tiltW)
     return leanWithinPageEnds(pull, w, h, wanted.coerceIn(-cap, cap))
 }
@@ -374,7 +407,8 @@ internal fun verticalLeanCap(pull: CurlPull, tiltW: Float): Float {
  * @param direction +1 向后翻 / -1 向前翻（来自 [orilumn.reader.ui.reader.FlipSession.direction]）
  * @param tilt 折痕倾斜量（0 = 竖直折痕）。拖动中由 [leanOf] 从拖动方向算出——**是斜率**，
  *   不是 `dy/|d|` 的正弦，所以斜拖时折痕才真的垂直于手指的轨迹（折痕锚点的横向符号由
- *   起手横滑方向锁住，见 [CurlPull.direction]），结算期间保持松手那一刻的值。
+ *   起手横滑方向锁住、横向分母锁在外向行程的最大值上，见 [CurlPull.direction] /
+ *   [CurlPull.spanX]），结算期间保持松手那一刻的值。
  *   这是**想要的**倾斜，跟手时 [leanOf] 已按竖向行程（[verticalLeanCap]）夹过；书脊这一侧
  *   不再压倾斜——折痕端点可以卷过书脊一个筒径（见文件头）。
  * @param pull 本次拖动（起手点 + 此刻手指 + 起手那一刻定的锚点），非 null 时折痕位置改由它

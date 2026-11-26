@@ -1157,6 +1157,51 @@ class CurlGeometryTest {
     }
 
     /**
+     * 横向收回时折痕不许跟着转正（读者 2026-11-26：「在屏幕左侧开始翻下一页，然后手指往右
+     * 移动时，折痕会自动转正，平行于屏幕竖边。这是个多余的动作」）。
+     *
+     * 折痕锚点的横向分母锁在**外向行程的最大值**上（[CurlPull.spanX]）：收回多少、越过
+     * 按下点多远，倾斜都保持，折痕只平移；竖向移动仍照常改倾斜（2026-11-19 的口径）。
+     * 早先用此刻的 `|u_x|`，手指往右一收 `|u_x|` 变大，倾斜一路收到 0。
+     */
+    @Test
+    fun retractingSidewaysDoesNotRotateTheCrease() {
+        val w = 1840f
+        val h = 2800f
+        val press = Offset(700f, 1600f)
+        val span = 400f
+        fun leanAt(x: Float, y: Float = 1500f) = leanOf(
+            CurlPull(
+                from = press,
+                to = Offset(x, y),
+                anchor = CurlAnchor.Crease,
+                direction = 1,
+                spanX = span,
+            ),
+            w,
+            h,
+        )
+        val held = leanAt(press.x - span)
+        assertTrue("这一手应当有倾斜（lean=$held）", kotlin.math.abs(held) > 0.1f)
+        for (x in listOf(
+            press.x - 300f,
+            press.x - 100f,
+            press.x,
+            press.x + 200f,
+            press.x + 600f,
+            press.x + 1000f,
+        )) {
+            assertEquals("x=$x 收回时折痕角度不许变（held=$held）", held, leanAt(x), 1e-3f)
+        }
+        // 竖向仍照常改倾斜：同一个横向位置，手指再往上 200px，倾斜必须跟着变大。
+        val deeper = leanAt(press.x + 600f, 1300f)
+        assertTrue(
+            "竖向移动仍要改倾斜（$held → $deeper）",
+            kotlin.math.abs(deeper - held) > 0.05f,
+        )
+    }
+
+    /**
      * 纸自由边（材料坐标 x = 页宽）上、材料纵坐标 = [texY] 那一点落在屏幕的哪。
      *
      * 网格顶点只落在页角与扫线交点上，抓点一般在两点之间，按材料坐标线性插值取。

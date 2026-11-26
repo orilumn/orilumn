@@ -114,6 +114,15 @@ class FlipController(
     val curlLean: MutableFloatState = mutableFloatStateOf(0f)
 
     /**
+     * 本次手势里**外向**（沿翻页方向）走得最远的横向距离（px，只增不减，见
+     * `curl/CurlPull.spanX`）。
+     *
+     * 折痕锚点的倾斜分母用它，收回时折痕只平移、不转正。只给卷曲跟手用：起手清零，
+     * [updateCurlPull] 逐帧取最大值。
+     */
+    private var curlSpanX = 0f
+
+    /**
      * 结算期间的**阴影淡出系数**（0..1，见 `curl/CurlShape.shadowFade`）。
      *
      * 跟手时恒 1（形状听手指）；松手结算从**跟手那一帧**接手，逐帧淡到 0。不能照进度
@@ -296,6 +305,7 @@ class FlipController(
         progress.value = 0f
         direction.value = 0
         curlPull.value = null
+        curlSpanX = 0f
         curlAnchor.value = null
         curlFade.value = Float.NaN
         curlLeanFade.value = Float.NaN
@@ -422,6 +432,7 @@ class FlipController(
         progress.value = 0f
         curlPull.value = null
         curlLean.value = 0f
+        curlSpanX = 0f
         curlAnchor.value = null
         curlFade.value = Float.NaN
         curlLeanFade.value = Float.NaN
@@ -495,7 +506,8 @@ class FlipController(
      *
      * @param downX/downY 按下点（页坐标）：`downY` 是抓点的行（与参考实现 `mDragStartPos` 同口径），
      *   `downX` 决定锚点模式——右半边 `Edge`、左半边 `Crease`（见 [CurlAnchor]），整个手势只判这一次。
-     *   锚点本身与翻页方向无关；翻页方向只给折痕锚点锁横向符号（见 `curl/CurlPull.direction`）
+     *   锚点本身与翻页方向无关；翻页方向只给折痕锚点锁横向符号与分母（见
+     *   `curl/CurlPull.direction` / `curl/CurlPull.spanX`）
      * @param x/y 此刻手指的页坐标
      * @param pageW/pageH 当前页尺寸（px）：折痕斜率按页宽页高换算
      */
@@ -519,6 +531,12 @@ class FlipController(
         // 左半边抓折痕（折痕穿过手指）。`downX` 整个手势不变 ⇒ 模式固定，拖动中手指
         // 跨过屏幕中线也不改判（读者口径）。与翻页方向无关。
         val crease = downX < pageW * 0.5f
+        // 折痕锚点的倾斜分母锁在**外向行程的最大值**上（见 `curl/CurlPull.spanX`）：
+        // 手指往回收时折痕只平移、不转正。外向 = 沿翻页方向（下一页向左、上一页向右）。
+        if (crease) {
+            val outward = direction.value * (downX - x)
+            if (outward > curlSpanX) curlSpanX = outward
+        }
         val pull = CurlPull(
             // 折痕锚点拿按下点当 `from`：拖动方向 = 按下点 → 手指，倾斜与行程都照它算；
             // 页边锚点用页右缘（参考实现 `pageRect.right`）。
@@ -529,6 +547,7 @@ class FlipController(
             // 折痕锚点的横向符号由起手横滑方向锁住（见 `curl/leanOf`）：翻页方向在
             // `beginDrag` 就定了，整个手势不变。
             direction = direction.value,
+            spanX = if (crease) curlSpanX else 0f,
         )
         curlPull.value = pull
         curlLean.value = leanOf(pull, pageW, pageH)

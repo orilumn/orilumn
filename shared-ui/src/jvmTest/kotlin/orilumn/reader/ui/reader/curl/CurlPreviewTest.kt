@@ -47,8 +47,8 @@ class CurlPreviewTest {
 
     private fun images(page: ImageBitmap) = CurlPageImages().apply { this.page = RasterTexture(page) }
 
-    private fun dump(name: String, progress: Float, direction: Int, tilt: Float = 0f) {
-        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, direction, tilt)
+    private fun dump(name: String, progress: Float, tilt: Float = 0f) {
+        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, tilt)
         val img = ImageBitmap(pageW, pageH, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(pageW.toFloat(), pageH.toFloat())) {
             drawCurlFrame(
@@ -70,19 +70,15 @@ class CurlPreviewTest {
 
     @Test
     fun dumpFrames() {
-        dump("next-015", 0.15f, 1)
-        dump("next-035", 0.35f, 1)
-        dump("next-050", 0.50f, 1)
-        dump("next-075", 0.75f, 1)
-        dump("next-035-tilt", 0.35f, 1, tilt = 0.5f)
-        dump("next-035-tilt-neg", 0.35f, 1, tilt = -0.5f)
-        dump("prev-050", 0.50f, -1)
-        dump("prev-050-tilt", 0.50f, -1, tilt = 0.5f)
+        dump("next-015", 0.15f)
+        dump("next-035", 0.35f)
+        dump("next-050", 0.50f)
+        dump("next-075", 0.75f)
+        dump("next-035-tilt", 0.35f, tilt = 0.5f)
+        dump("next-035-tilt-neg", 0.35f, tilt = -0.5f)
         // 收尾那几帧（结算里扶正 + 阴影淡出）：相邻两帧之间不该有跳变，p = 1 等于目标页。
         for (p in listOf(0.85f, 0.92f, 0.96f, 0.99f, 1f)) {
-            dump("tail-" + (p * 100).toInt(), p, 1, tilt = 0.55f)
+            dump("tail-" + (p * 100).toInt(), p, tilt = 0.55f)
         }
-        // 上一页面起手（p → 0，折痕同样贴在书脊）。
-        dump("head-prev", 0.02f, -1, tilt = 0.5f)
     }
 }

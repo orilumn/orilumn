@@ -35,9 +35,7 @@ import kotlin.math.sin
  *
  * ## 掀的是哪一半、卷在哪一侧
  *
- * `x' < 0` 是「已经掀起来、离开页面的那一半」，它在折痕的哪一侧由**翻页方向**决定：
- * 向后翻掀右半边（露出页在右），向前翻掀左半边（露出页在左）。这一侧统一用
- * [CurlShape.direction] 算出的 `side` 表示，几何本身只有一套式子。
+ * `x' < 0` 是「已经掀起来、离开页面的那一半」：书脊恒在左，掀起的永远是右半边。
  *
  * 卷起来的那一半**朝掀起侧鼓出去**、绕满半圈后的平铺段**落回没掀起的那一侧**
  * （参考实现 `Mesh3D.curl`：局部 +x 是拖动方向，`x = R·sin(x'/R)` 把掀起侧的材料
@@ -179,14 +177,11 @@ internal fun buildCurlMesh(
     val ox = (top.x + bottom.x) * 0.5f
     val oy = h * 0.5f
 
-    // 掀起来的是哪一半：向后翻掀 +n 侧，向前翻掀 −n 侧。
-    val side = if (shape.direction >= 0) 1f else -1f
-
     /** 该点沿折痕法向的坐标（材料坐标）。 */
     fun normalOf(x: Float, y: Float): Float = (x - ox) * nx + (y - oy) * ny
 
     /** 该点对应的扫线参数：0 = 折痕，负 = 沿纸面离折痕 `|x'|` 那么远。 */
-    fun scanX(x: Float, y: Float): Float = -side * normalOf(x, y)
+    fun scanX(x: Float, y: Float): Float = -normalOf(x, y)
 
     // 页面四角在折痕坐标系里的 x'：最负的那个是「掀起的纸最远端」。
     val cx = floatArrayOf(0f, w, w, 0f)
@@ -241,7 +236,7 @@ internal fun buildCurlMesh(
     /** 扫线 `x'` 与页面矩形的交（局部沿折痕的 `λ` 区间，按「下端点、上端点」输出）。 */
     fun spanAt(x: Float): FloatArray? {
         // 页坐标里的直线：P(λ) = 原点 + n·(材料偏移) + t·λ，λ 就是沿折痕的坐标。
-        val a = -side * x
+        val a = -x
         val px = ox + nx * a
         val py = oy + ny * a
         var lo = -1e7f
@@ -297,12 +292,12 @@ internal fun buildCurlMesh(
         val span = spanAt(x) ?: continue
         // 屏幕上沿法向的偏移：卷曲朝**掀起的那一侧**鼓出去（参考实现里局部 +x 是拖动方向，
         // 卷曲量取正），绕满半圈后的平铺段落回**没掀起**的那一侧。所以屏幕偏移取负号：
-        // 向后翻纸卷在折痕右边、平铺段在左边，向前翻整体镜像——同一个式子，靠 `side` 定侧。
-        val sOff = -side * curled(x)
+        // 纸卷在折痕右边、平铺段在左边。
+        val sOff = -curled(x)
         val sx = ox + nx * sOff
         val sy = oy + ny * sOff
-        // 材料位置：沿法向离折痕 side×|x'| 那么远。
-        val a = -side * x
+        // 材料位置：沿法向离折痕 |x'| 那么远。
+        val a = -x
         val mx = ox + nx * a
         val my = oy + ny * a
         val arcLen = -x

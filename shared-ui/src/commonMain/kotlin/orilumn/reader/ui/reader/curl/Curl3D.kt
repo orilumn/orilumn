@@ -208,13 +208,12 @@ internal fun DrawScope.drawCurl3DFrame(
 
     // 折痕坐标系（与 [buildCurlMesh] 同一套）：t 沿折痕向下，nR 是法向（指向 +x 一侧），
     // up 是「从折痕指向掀起侧」的方向——纸卷在这一侧鼓出去，平铺段落在另一侧；
-    // 明暗与落影都沿它取值，两端（翻页方向）通用。
+    // 明暗与落影都沿它取值。
     val t0 = Offset(shape.topX, 0f)
     val t1 = Offset(shape.bottomX, h)
     val foldLen = hypot(t1.x - t0.x, h).coerceAtLeast(1e-3f)
     val nR = Offset(h / foldLen, -(t1.x - t0.x) / foldLen)
-    val side = if (shape.direction >= 0) 1f else -1f
-    val up = Offset(nR.x * side, nR.y * side)
+    val up = nR
 
     // ④ 落影：纸卷压在露出页上。参考实现里落影顶点的偏移是 `z/2`、浓度按 `z/(2R)` 插值
     //    （`SHADOW_INNER_COLOR` 黑 0.5 → 透明），所以影的宽度与浓度都只跟「纸抬多高」有关：
@@ -384,15 +383,10 @@ internal fun DrawScope.drawCurl3DFrame(
  * 影带本身只有几十像素宽，线性淡到一半时它还整条压在留白里，看着仍是一条灰带；平方让它
  * 在**刚进留白**的时候就已经很淡，贴边时正好归零。
  *
- * 距离的取法跟着几何走：`direction = -1` 是左右镜像几何，自由边在左缘，所以量的是 `foldX`；
- * 其余情况自由边在右缘，量的是 `pageW - foldX`。
+ * 距离的取法：自由边永远在页右缘，量的是 `pageW - foldX`。
  */
 internal fun freeEdgeShadowFade(shape: CurlShape, radius: Float): Float {
-    val freeGap = if (shape.direction >= 0) {
-        shape.pageW - shape.foldX
-    } else {
-        shape.foldX
-    }
+    val freeGap = shape.pageW - shape.foldX
     val span = (radius * CURL3D_FREE_EDGE_SHADOW_FADE).coerceAtLeast(1f)
     val k = (freeGap / span).coerceIn(0f, 1f)
     return k * k

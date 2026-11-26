@@ -46,7 +46,7 @@ class CurlMeshPreviewTest {
     }
 
     private fun dump(name: String, progress: Float, tilt: Float = 0f, radiusRatio: Float = CURL3D_RADIUS_RATIO) {
-        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, 1, tilt)
+        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress, tilt)
         val front = CurlPageImages().apply { page = RasterTexture(fakePage(0xFF2A2A2A.toInt(), 1f)) }
         val back = CurlPageImages().apply { page = RasterTexture(fakePage(0xFF2A2A2A.toInt(), 0.45f)) }
         val img = ImageBitmap(pageW, pageH, ImageBitmapConfig.Argb8888, hasAlpha = true)
@@ -73,25 +73,23 @@ class CurlMeshPreviewTest {
         val ty = (h - th) / 2f
         val front = CurlPageImages().apply { page = RasterTexture(fakePageSized(tw, th, 0xFF2A2A2A.toInt())) }
         val back = CurlPageImages().apply { page = RasterTexture(fakePageSized(tw, th, 0xFF7A3A2E.toInt())) }
-        for (dir in listOf(1, -1)) {
-            for (p in listOf(0.10f, 0.20f, 0.35f, 0.45f, 0.70f, 0.90f)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, 0f)
-                val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
-                CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
-                    drawRect(Color(0xFFEFECE3.toInt()))
-                    drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), Offset(tx, ty), Offset(tx, ty))
-                }
-                val name = "build/dev-${if (dir > 0) "fwd" else "bwd"}-p${(p * 100).toInt()}.png"
-                val out = File(name)
-                val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
-                out.writeBytes(data.bytes)
-                val r = curlRadius(shape)
-                val exposed = if (dir > 0) shape.pageW - shape.foldX - r else shape.foldX - r
-                println("wrote ${out.absolutePath} fold=${shape.topX} r=$r 新页露出=${exposed / shape.pageW}")
+        for (p in listOf(0.10f, 0.20f, 0.35f, 0.45f, 0.70f, 0.90f)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, 0f)
+            val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
+                drawRect(Color(0xFFEFECE3.toInt()))
+                drawCurl3DFrame(shape, front, back, 0xFFF1EEE6.toInt(), Offset(tx, ty), Offset(tx, ty))
             }
+            val name = "build/dev-p${(p * 100).toInt()}.png"
+            val out = File(name)
+            val data = Image.makeFromBitmap(img.asSkiaBitmap()).encodeToData(EncodedImageFormat.PNG)!!
+            out.writeBytes(data.bytes)
+            val r = curlRadius(shape)
+            val exposed = shape.pageW - shape.foldX - r
+            println("wrote ${out.absolutePath} fold=${shape.topX} r=$r 新页露出=${exposed / shape.pageW}")
         }
         for ((p, tilt) in listOf(0.2f to 0.35f, 0.45f to -0.35f, 0.7f to 0.35f)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt)
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {
                 drawRect(Color(0xFFEFECE3.toInt()))
@@ -138,7 +136,7 @@ class CurlMeshPreviewTest {
         val front = CurlPageImages().apply { page = RasterTexture(fakePageSized(tw, th, 0xFF2A2A2A.toInt())) }
         val back = CurlPageImages().apply { page = RasterTexture(fakePageSized(tw, th, 0xFF2A2A2A.toInt())) }
         for ((p, tilt) in listOf(0.026f to 0.653f, 0.026f to 0f, 0.4f to 0.653f, 0.4f to 0f)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt)
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
             println("shape p=$p tilt=$tilt top=${shape.topX} bot=${shape.bottomX} lean=${shape.lean}")
             val img = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
             CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w.toFloat(), h.toFloat())) {

@@ -98,14 +98,11 @@ class Curl3DRenderTest {
     fun untouchedFrameIsTheCurrentPage() {
         val w = 400
         val h = 600
-        // 这里直接量低层几何：两个方向都传 front = 当前页，起手帧都画 front。
-        // 翻页层实际翻上一页时会把「被翻的那张」换成目标页（见 [previousPageTurnsTheTargetSheet]），
-        // 低层镜像几何只用来对照，不再直接上屏。
-        for (dir in listOf(1, -1)) {
-            val px = render(curlShape(w.toFloat(), h.toFloat(), 0f, dir), solid(w, h, red), solid(w, h, blue))
-                .toPixelMap()
-            assertEquals("dir=$dir 起手时画面上是当前页", red, px[200, 300].toArgb())
-        }
+        // 直接量低层几何：起手帧画 front（当前页）。翻页层实际翻上一页时会把
+        // 「被翻的那张」换成目标页（见 [previousPageTurnsTheTargetSheet]）。
+        val px = render(curlShape(w.toFloat(), h.toFloat(), 0f), solid(w, h, red), solid(w, h, blue))
+            .toPixelMap()
+        assertEquals("起手时画面上是当前页", red, px[200, 300].toArgb())
     }
 
     /**
@@ -123,7 +120,7 @@ class Curl3DRenderTest {
         val bodyTex = Offset(margin.toFloat(), margin.toFloat())
         // 起手帧只画正面那张（被翻走的那张 = 正文）。
         val startPx = render(
-            curlShape(w.toFloat(), h.toFloat(), 0f, 1),
+            curlShape(w.toFloat(), h.toFloat(), 0f),
             body,
             cover,
             frontTex = bodyTex,
@@ -133,7 +130,7 @@ class Curl3DRenderTest {
         assertEquals("版心外应当是纸色", paper, startPx[4, 4].toArgb())
         // 翻完那一帧只画背面那张（目标页 = 封面）：整页图贴页角，不缩进版心。
         val endPx = render(
-            curlShape(w.toFloat(), h.toFloat(), 1f, 1),
+            curlShape(w.toFloat(), h.toFloat(), 1f),
             body,
             cover,
             frontTex = bodyTex,
@@ -147,13 +144,11 @@ class Curl3DRenderTest {
     fun settledFrameIsTheTargetPage() {
         val w = 400
         val h = 600
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f)
-            val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
-            for (x in 0 until w step 7) {
-                for (y in 0 until h step 13) {
-                    assertEquals("dir=$dir ($x,$y) 翻完那一帧应当只剩目标页", blue, px[x, y].toArgb())
-                }
+        val shape = curlShape(w.toFloat(), h.toFloat(), 1f, tilt = 0.55f)
+        val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        for (x in 0 until w step 7) {
+            for (y in 0 until h step 13) {
+                assertEquals("($x,$y) 翻完那一帧应当只剩目标页", blue, px[x, y].toArgb())
             }
         }
     }
@@ -214,8 +209,8 @@ class Curl3DRenderTest {
         val h = 600
         val mid = h / 2
         val pull = CurlPull(from = Offset(w.toFloat(), mid.toFloat()), to = Offset(260f, mid.toFloat()))
-        val ahead = curlShape(w.toFloat(), h.toFloat(), 0.02f, 1, 0f, pull)
-        val crossed = curlShape(w.toFloat(), h.toFloat(), -0.02f, 1, 0f, pull)
+        val ahead = curlShape(w.toFloat(), h.toFloat(), 0.02f, 0f, pull)
+        val crossed = curlShape(w.toFloat(), h.toFloat(), -0.02f, 0f, pull)
         assertEquals("折痕只听手指，不听累计进度", ahead.foldX, crossed.foldX, 1e-3f)
         assertTrue(
             "这一帧折角还在（折痕 ${crossed.foldX} / 页宽 $w），不该退化成整页平铺",
@@ -272,7 +267,8 @@ class Curl3DRenderTest {
      * 要翻到上一页，右边就变成书脊了」）。
      *
      * 折痕本身**与翻页方向无关**：同一个手指轨迹、同一个折痕位置，两个方向的折痕是同一根线
-     * （都垂直于手指轨迹）。只有「被翻的那张纸」和「露出页」换位。早先这里对上一页取反倾斜，
+     * （左半边垂直于手指轨迹，右半边两个翻页方向同向、以翻下页为准）。只有「被翻的那张纸」
+     * 和「露出页」换位。早先这里对上一页取反倾斜，
      * 读者实测「同样在右侧翻下页和翻上页，页边旋转方向相反，翻上页不顺手」——那正是取反的锅。
      */
     @Test
@@ -283,13 +279,11 @@ class Curl3DRenderTest {
         for (p in listOf(0.1f, 0.2f, 0.45f, 0.9f)) {
             val next = curlFrame(w, h, p, direction = 1, tilt = tilt)
             assertFalse("下一页翻的是当前页", next.turningIsTarget)
-            assertEquals("下一页的几何", 1, next.shape.direction)
             assertEquals(p, next.shape.progress, 1e-6f)
 
             // 同一个折痕位置对应的上一页手势进度是 `1-p`（折痕在 `w·(1-p)`，两方向相同）。
             val prev = curlFrame(w, h, 1f - p, direction = -1, tilt = tilt)
             assertTrue("上一页翻的是上一页那张纸", prev.turningIsTarget)
-            assertEquals("上一页的卷曲几何也必须朝左书脊那一侧", 1, prev.shape.direction)
             assertEquals("上一页是同一套几何倒着走", p, prev.shape.progress, 1e-6f)
 
             // 折痕这条线两个方向逐点相同：位置、斜率、两端横坐标、影的浓淡都不许跟方向走。
@@ -350,34 +344,31 @@ class Curl3DRenderTest {
 
     /**
      * 纸卷鼓在掀起侧、平铺段落回另一侧：折痕往里一点是纸卷（不是目标页），
-     * 越过纸卷与落影之后才是目标页；折痕另一侧仍是当前页。两个方向互为镜像。
+     * 越过纸卷与落影之后才是目标页；折痕另一侧仍是当前页。
      */
     @Test
     fun rollSitsOnTheLiftedSide() {
         val w = 400
         val h = 600
         val mid = h / 2
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 0.5f, dir)
-            val radius = curlRadius(shape)
-            val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
-            val fold = shape.foldX
-            val inward = if (dir >= 0) 1f else -1f
-            // 远离折痕的两头：没掀起的那半页还是当前页，露出页那一侧已经是目标页。
-            val unturnedEdge = if (dir >= 0) 5 else w - 5
-            val revealedEdge = if (dir >= 0) w - 5 else 5
-            assertEquals("dir=$dir 没掀起的那半页应当是当前页", red, px[unturnedEdge, mid].toArgb())
-            assertEquals("dir=$dir 露出页那一侧的页边应当是目标页", blue, px[revealedEdge, mid].toArgb())
-            // 折痕往里 5px 被纸卷盖住，不能直接看到目标页。
-            val nearCrease = (fold + inward * 5f).toInt()
-            assertTrue(
-                "dir=$dir 折痕旁边应当是纸卷，不该直接露出目标页（实测 ${px[nearCrease, mid].toArgb().toUInt().toString(16)}）",
-                px[nearCrease, mid].toArgb() != blue,
-            )
-            // 纸卷半径 + 落影宽度（≈ 2R）之外，目标页完整可见。
-            val beyondShadow = (fold + inward * (radius * 3f + 8f)).toInt()
-            assertEquals("dir=$dir 纸卷与落影之外应当露出目标页", blue, px[beyondShadow, mid].toArgb())
-        }
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.5f)
+        val radius = curlRadius(shape)
+        val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        val fold = shape.foldX
+        // 远离折痕的两头：没掀起的那半页还是当前页，露出页那一侧已经是目标页。
+        val unturnedEdge = 5
+        val revealedEdge = w - 5
+        assertEquals("没掀起的那半页应当是当前页", red, px[unturnedEdge, mid].toArgb())
+        assertEquals("露出页那一侧的页边应当是目标页", blue, px[revealedEdge, mid].toArgb())
+        // 折痕往里 5px 被纸卷盖住，不能直接看到目标页。
+        val nearCrease = (fold + 5f).toInt()
+        assertTrue(
+            "折痕旁边应当是纸卷，不该直接露出目标页（实测 ${px[nearCrease, mid].toArgb().toUInt().toString(16)}）",
+            px[nearCrease, mid].toArgb() != blue,
+        )
+        // 纸卷半径 + 落影宽度（≈ 2R）之外，目标页完整可见。
+        val beyondShadow = (fold + (radius * 3f + 8f)).toInt()
+        assertEquals("纸卷与落影之外应当露出目标页", blue, px[beyondShadow, mid].toArgb())
     }
 
     /** 翻到九成时目标页必须占屏幕大部分（「翻了两成看起来几乎没动」那一类回归）。 */
@@ -386,16 +377,14 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         val mid = h / 2
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 0.9f, dir)
-            val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
-            var target = 0
-            for (x in 0 until w) if (px[x, mid].toArgb() == blue) target++
-            assertTrue(
-                "dir=$dir p=0.9 时目标页只占 ${target * 100 / w}% —— 纸卷/平铺段接反了",
-                target >= w * 65 / 100,
-            )
-        }
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.9f)
+        val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+        var target = 0
+        for (x in 0 until w) if (px[x, mid].toArgb() == blue) target++
+        assertTrue(
+            "p=0.9 时目标页只占 ${target * 100 / w}% —— 纸卷/平铺段接反了",
+            target >= w * 65 / 100,
+        )
     }
 
     /**
@@ -415,44 +404,41 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         val mid = h / 2
-        for (dir in listOf(1, -1)) {
-            val p = 0.45f
-            val base = curlShape(w.toFloat(), h.toFloat(), p, dir)
-            val radius = curlRadius(base)
-            // 纸背自由边 = 折痕往「没掀起」那一侧退（掀起长度 − πR）。
-            val back = w * p - PI.toFloat() * radius
-            assertTrue("dir=$dir 这个进度下应当有平铺的纸背", back > radius)
-            val outward = if (dir >= 0) -1f else 1f
-            val edge = base.foldX + outward * back
-            val shadowWidth = radius * CURL3D_BACK_SHADOW_WIDTH
-            var seen = Float.NaN
-            for (tilt in listOf(0f, 0.002f, -0.002f)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
-                val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
-                fun luma(x: Int): Float {
-                    val c = px[x, mid]
-                    return (c.red + c.green + c.blue) / 3f
-                }
-                fun at(along: Float) = luma((edge + outward * along).toInt())
-                val besideEdge = at(shadowWidth * 0.35f)
-                val plainPaper = at(shadowWidth * 3f)
+        val p = 0.45f
+        val base = curlShape(w.toFloat(), h.toFloat(), p)
+        val radius = curlRadius(base)
+        // 纸背自由边 = 折痕往「没掀起」那一侧退（掀起长度 − πR）。
+        val back = w * p - PI.toFloat() * radius
+        assertTrue("这个进度下应当有平铺的纸背", back > radius)
+        val edge = base.foldX - back
+        val shadowWidth = radius * CURL3D_BACK_SHADOW_WIDTH
+        var seen = Float.NaN
+        for (tilt in listOf(0f, 0.002f, -0.002f)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt = tilt)
+            val px = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
+            fun luma(x: Int): Float {
+                val c = px[x, mid]
+                return (c.red + c.green + c.blue) / 3f
+            }
+            fun at(along: Float) = luma((edge - along).toInt())
+            val besideEdge = at(shadowWidth * 0.35f)
+            val plainPaper = at(shadowWidth * 3f)
+            assertTrue(
+                "tilt=$tilt 自由边外没有影：边旁 $besideEdge / 空白处 $plainPaper",
+                plainPaper - besideEdge > 0.03f,
+            )
+            if (!seen.isNaN()) {
                 assertTrue(
-                    "dir=$dir tilt=$tilt 自由边外没有影：边旁 $besideEdge / 空白处 $plainPaper",
-                    plainPaper - besideEdge > 0.03f,
-                )
-                if (!seen.isNaN()) {
-                    assertTrue(
-                        "dir=$dir tilt=$tilt 自由边外的影忽浓忽淡：$besideEdge / 竖直那一帧 $seen",
-                        abs(besideEdge - seen) < 0.01f,
-                    )
-                }
-                seen = besideEdge
-                // 纸背（影的内侧）不许有灰带：挨着边与往里一段一样亮。
-                assertTrue(
-                    "dir=$dir tilt=$tilt 影漏到纸背上了：边内 ${at(-shadowWidth * 0.35f)} / 再往里 ${at(-shadowWidth)}",
-                    abs(at(-shadowWidth * 0.35f) - at(-shadowWidth)) < 0.01f,
+                    "tilt=$tilt 自由边外的影忽浓忽淡：$besideEdge / 竖直那一帧 $seen",
+                    abs(besideEdge - seen) < 0.01f,
                 )
             }
+            seen = besideEdge
+            // 纸背（影的内侧）不许有灰带：挨着边与往里一段一样亮。
+            assertTrue(
+                "tilt=$tilt 影漏到纸背上了：边内 ${at(-shadowWidth * 0.35f)} / 再往里 ${at(-shadowWidth)}",
+                abs(at(-shadowWidth * 0.35f) - at(-shadowWidth)) < 0.01f,
+            )
         }
     }
 
@@ -470,7 +456,7 @@ class Curl3DRenderTest {
             var minCover = Int.MAX_VALUE
             var maxCover = 0
             for (tilt in listOf(-0.002f, 0f, 0.002f)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, 1, tilt = tilt)
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt = tilt)
                 val on = render(shape, solid(w, h, red), solid(w, h, blue)).toPixelMap()
                 val off = render(shape.copy(shadowFade = 0f), solid(w, h, red), solid(w, h, blue)).toPixelMap()
                 var cover = 0
@@ -501,63 +487,60 @@ class Curl3DRenderTest {
     fun backHasThreePaperEdgesToShade() {
         val w = 400f
         val h = 600f
-        for (dir in listOf(1, -1)) {
-            // 竖折痕：自由边是贯通纸面的一条边，离折痕「掀起长度 − πR」。
-            run {
-                val p = 0.45f
-                val shape = curlShape(w, h, p, dir)
-                val mesh = buildCurlMesh(shape, curlRadius(shape))
-                val corners = mesh.backCorners()
-                assertTrue("dir=$dir 这个进度下应当有平铺的纸背", corners != null)
-                val (near0, far0, far1, near1) = corners!!
-                val t0 = Offset(shape.topX, 0f)
-                val t1 = Offset(shape.bottomX, h)
-                val foldLen = hypot(t1.x - t0.x, h)
-                val side = if (shape.direction >= 0) 1f else -1f
-                val up = Offset(h / foldLen * side, -(t1.x - t0.x) / foldLen * side)
-                fun alongUp(pt: Offset) = (pt.x - t0.x) * up.x + (pt.y - t0.y) * up.y
-                val flap = w * p - PI.toFloat() * curlRadius(shape)
-                assertEquals("dir=$dir 自由边不在纸背外沿", -flap, alongUp(far0), 3f)
-                assertEquals("dir=$dir 自由边两头不在同一条边上", alongUp(far0), alongUp(far1), 3f)
-                assertEquals("dir=$dir 近折痕那头不贴折痕", 0f, alongUp(near0), 3f)
-                // 自由边是末行扫线，长度 = 页面高度那条边。
-                assertEquals(
-                    "dir=$dir 自由边没有横穿纸面",
-                    h.toFloat(),
-                    hypot(far1.x - far0.x, far1.y - far0.y),
-                    h * 0.05f,
-                )
-                // 两条直角边 = 纸的上下边转过来的那两条，长度 = 平铺段宽度（掀起长度 − πR）。
-                assertEquals(
-                    "dir=$dir 直角边长度不对",
-                    flap,
-                    hypot(far0.x - near0.x, far0.y - near0.y),
-                    3f,
-                )
-                assertEquals(
-                    "dir=$dir 直角边长度不对",
-                    flap,
-                    hypot(far1.x - near1.x, far1.y - near1.y),
-                    3f,
-                )
-            }
-            // 斜折痕：自由边收成一个页角，两条直角边仍在页面中间相交成直角。
-            run {
-                val shape = curlShape(w, h, 0.45f, dir, tilt = 0.35f)
-                val mesh = buildCurlMesh(shape, curlRadius(shape))
-                val (near0, far0, far1, near1) = mesh.backCorners()!!
-                val e1x = far0.x - near0.x
-                val e1y = far0.y - near0.y
-                val e2x = far1.x - near1.x
-                val e2y = far1.y - near1.y
-                val cos = abs(e1x * e2x + e1y * e2y) /
-                    (hypot(e1x, e1y) * hypot(e2x, e2y)).coerceAtLeast(1e-3f)
-                assertTrue("dir=$dir 斜折痕下两条直角边不再垂直：cos=$cos", cos < 0.2f)
-                assertTrue(
-                    "dir=$dir 斜折痕下自由边没有收窄（应当只剩页角附近）",
-                    hypot(far1.x - far0.x, far1.y - far0.y) < h * 0.5f,
-                )
-            }
+        // 竖折痕：自由边是贯通纸面的一条边，离折痕「掀起长度 − πR」。
+        run {
+            val p = 0.45f
+            val shape = curlShape(w, h, p)
+            val mesh = buildCurlMesh(shape, curlRadius(shape))
+            val corners = mesh.backCorners()
+            assertTrue("这个进度下应当有平铺的纸背", corners != null)
+            val (near0, far0, far1, near1) = corners!!
+            val t0 = Offset(shape.topX, 0f)
+            val t1 = Offset(shape.bottomX, h)
+            val foldLen = hypot(t1.x - t0.x, h)
+            val up = Offset(h / foldLen, -(t1.x - t0.x) / foldLen)
+            fun alongUp(pt: Offset) = (pt.x - t0.x) * up.x + (pt.y - t0.y) * up.y
+            val flap = w * p - PI.toFloat() * curlRadius(shape)
+            assertEquals("自由边不在纸背外沿", -flap, alongUp(far0), 3f)
+            assertEquals("自由边两头不在同一条边上", alongUp(far0), alongUp(far1), 3f)
+            assertEquals("近折痕那头不贴折痕", 0f, alongUp(near0), 3f)
+            // 自由边是末行扫线，长度 = 页面高度那条边。
+            assertEquals(
+                "自由边没有横穿纸面",
+                h.toFloat(),
+                hypot(far1.x - far0.x, far1.y - far0.y),
+                h * 0.05f,
+            )
+            // 两条直角边 = 纸的上下边转过来的那两条，长度 = 平铺段宽度（掀起长度 − πR）。
+            assertEquals(
+                "直角边长度不对",
+                flap,
+                hypot(far0.x - near0.x, far0.y - near0.y),
+                3f,
+            )
+            assertEquals(
+                "直角边长度不对",
+                flap,
+                hypot(far1.x - near1.x, far1.y - near1.y),
+                3f,
+            )
+        }
+        // 斜折痕：自由边收成一个页角，两条直角边仍在页面中间相交成直角。
+        run {
+            val shape = curlShape(w, h, 0.45f, tilt = 0.35f)
+            val mesh = buildCurlMesh(shape, curlRadius(shape))
+            val (near0, far0, far1, near1) = mesh.backCorners()!!
+            val e1x = far0.x - near0.x
+            val e1y = far0.y - near0.y
+            val e2x = far1.x - near1.x
+            val e2y = far1.y - near1.y
+            val cos = abs(e1x * e2x + e1y * e2y) /
+                (hypot(e1x, e1y) * hypot(e2x, e2y)).coerceAtLeast(1e-3f)
+            assertTrue("斜折痕下两条直角边不再垂直：cos=$cos", cos < 0.2f)
+            assertTrue(
+                "斜折痕下自由边没有收窄（应当只剩页角附近）",
+                hypot(far1.x - far0.x, far1.y - far0.y) < h * 0.5f,
+            )
         }
     }
 
@@ -571,45 +554,43 @@ class Curl3DRenderTest {
     fun foldedCornerSideEdgesCastShadows() {
         val w = 400
         val h = 600
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 0.45f, dir, tilt = 0.35f)
-            val radius = curlRadius(shape)
-            val mesh = buildCurlMesh(shape, radius)
-            val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }
-            assertTrue("dir=$dir 斜折痕下应当有纸背", back != null)
-            val edges = mesh.pageEdges()!!
-            val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
-            val width = radius * CURL3D_BACK_SHADOW_WIDTH
-            fun lumaAt(pt: Offset): Float {
-                val c = px[pt.x.toInt().coerceIn(0, w - 1), pt.y.toInt().coerceIn(0, h - 1)]
-                return (c.red + c.green + c.blue) / 3f
-            }
-            // 纸在哪一侧按同一扫线行的另一条页边判（不按重心：纸卷起来时重心会落到纸外）。
-            var checked = 0
-            val rows = listOf(
-                (back!!.firstRow + back.lastRow) / 2,
-                back.firstRow + (back.lastRow - back.firstRow) * 3 / 4,
-            )
-            for (k in 0..1) {
-                for (row in rows) {
-                    val p = edges[k][row]
-                    val inward = edges[1 - k][row] - p
-                    val len = hypot(inward.x, inward.y)
-                    if (len < 10f) continue
-                    val outward = Offset(-inward.x / len, -inward.y / len)
-                    val near = p + outward * (width * 0.5f)
-                    val far = p + outward * (width * 3f)
-                    if (near.x < 6f || near.x > w - 6f || near.y < 6f || near.y > h - 6f) continue
-                    if (far.x < 2f || far.x > w - 2f || far.y < 2f || far.y > h - 2f) continue
-                    checked++
-                    assertTrue(
-                        "dir=$dir row=$row 折角的一条直角边没有落影：边旁 ${lumaAt(near)} / 更外侧 ${lumaAt(far)}",
-                        lumaAt(near) < lumaAt(far) - 0.02f,
-                    )
-                }
-            }
-            assertTrue("dir=$dir 两条直角边都没能采样，测试没测到东西", checked > 0)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.45f, tilt = 0.35f)
+        val radius = curlRadius(shape)
+        val mesh = buildCurlMesh(shape, radius)
+        val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back }
+        assertTrue("斜折痕下应当有纸背", back != null)
+        val edges = mesh.pageEdges()!!
+        val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+        val width = radius * CURL3D_BACK_SHADOW_WIDTH
+        fun lumaAt(pt: Offset): Float {
+            val c = px[pt.x.toInt().coerceIn(0, w - 1), pt.y.toInt().coerceIn(0, h - 1)]
+            return (c.red + c.green + c.blue) / 3f
         }
+        // 纸在哪一侧按同一扫线行的另一条页边判（不按重心：纸卷起来时重心会落到纸外）。
+        var checked = 0
+        val rows = listOf(
+            (back!!.firstRow + back.lastRow) / 2,
+            back.firstRow + (back.lastRow - back.firstRow) * 3 / 4,
+        )
+        for (k in 0..1) {
+            for (row in rows) {
+                val p = edges[k][row]
+                val inward = edges[1 - k][row] - p
+                val len = hypot(inward.x, inward.y)
+                if (len < 10f) continue
+                val outward = Offset(-inward.x / len, -inward.y / len)
+                val near = p + outward * (width * 0.5f)
+                val far = p + outward * (width * 3f)
+                if (near.x < 6f || near.x > w - 6f || near.y < 6f || near.y > h - 6f) continue
+                if (far.x < 2f || far.x > w - 2f || far.y < 2f || far.y > h - 2f) continue
+                checked++
+                assertTrue(
+                    "row=$row 折角的一条直角边没有落影：边旁 ${lumaAt(near)} / 更外侧 ${lumaAt(far)}",
+                    lumaAt(near) < lumaAt(far) - 0.02f,
+                )
+            }
+        }
+        assertTrue("两条直角边都没能采样，测试没测到东西", checked > 0)
     }
 
     /**
@@ -627,25 +608,23 @@ class Curl3DRenderTest {
         var checked = 0
         for (p in listOf(0.19f, 0.27f, 0.3f, 0.45f, 0.7f)) {
             for (tilt in listOf(0.05f, 0.15f, 0.35f)) {
-                for (dir in listOf(1, -1)) {
-                    val shape = curlShape(w, h, p, dir, tilt = tilt)
-                    val mesh = buildCurlMesh(shape, curlRadius(shape))
-                    val rows = mesh.arc.size / 2
-                    if (rows < 2) continue
-                    for (k in 0..1) {
-                        val at = (((rows - 1) * 2) + k) * 2
-                        val u = mesh.texCoords[at]
-                        val v = mesh.texCoords[at + 1]
-                        val onX = abs(u) < 0.6f || abs(u - w) < 0.6f
-                        val onY = abs(v) < 0.6f || abs(v - h) < 0.6f
-                        assertTrue(
-                            "p=$p tilt=$tilt dir=$dir 末行第 ${k + 1} 个端点 ($u,$v) 不在页角上：" +
-                                "扫线没走到页角，纸边和纸角的扇形影都会在角前截断",
-                            onX && onY,
-                        )
-                    }
-                    checked++
+                val shape = curlShape(w, h, p, tilt = tilt)
+                val mesh = buildCurlMesh(shape, curlRadius(shape))
+                val rows = mesh.arc.size / 2
+                if (rows < 2) continue
+                for (k in 0..1) {
+                    val at = (((rows - 1) * 2) + k) * 2
+                    val u = mesh.texCoords[at]
+                    val v = mesh.texCoords[at + 1]
+                    val onX = abs(u) < 0.6f || abs(u - w) < 0.6f
+                    val onY = abs(v) < 0.6f || abs(v - h) < 0.6f
+                    assertTrue(
+                        "p=$p tilt=$tilt 末行第 ${k + 1} 个端点 ($u,$v) 不在页角上：" +
+                            "扫线没走到页角，纸边和纸角的扇形影都会在角前截断",
+                        onX && onY,
+                    )
                 }
+                checked++
             }
         }
         assertTrue("一帧都没量到，测试没测到东西", checked > 0)
@@ -662,15 +641,15 @@ class Curl3DRenderTest {
         val h = 600
         // 后面的 `0.27f to 0.05f` 是读者报的那一帧：页角正好落在卷筒左侧边（平铺段长度≈0）时，
         // 页角扫线曾被「差不足半像素就合并」并掉，两条页边停在离角 1.8px 处，扇形整个不画。
-        for ((p, tilt) in listOf(0.3f to 0.25f, 0.27f to 0.05f)) for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
+        for ((p, tilt) in listOf(0.3f to 0.25f, 0.27f to 0.05f)) {
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt = tilt)
             val radius = curlRadius(shape)
             val mesh = buildCurlMesh(shape, radius)
             val corners = mesh.backCorners()
-            assertTrue("p=$p tilt=$tilt dir=$dir 斜折痕下应当有纸背", corners != null)
+            assertTrue("p=$p tilt=$tilt 斜折痕下应当有纸背", corners != null)
             val (near0, far0, far1, near1) = corners!!
             // 这个几何下自由边退化成一点，两条直角边共用 far0。
-            assertTrue("p=$p tilt=$tilt dir=$dir 自由边没有退化，测不到转角", (far0 - far1).getDistance() < 0.5f)
+            assertTrue("p=$p tilt=$tilt 自由边没有退化，测不到转角", (far0 - far1).getDistance() < 0.5f)
             val center = corners.reduce { acc, p -> acc + p } / corners.size.toFloat()
             fun outward(to: Offset): Offset {
                 val dx = to.x - far0.x
@@ -684,7 +663,7 @@ class Curl3DRenderTest {
             }
             val bisector = outward(near0) + outward(near1)
             val bisLen = hypot(bisector.x, bisector.y)
-            assertTrue("p=$p tilt=$tilt dir=$dir 两条直角边不在纸角上相交", bisLen > 0.5f)
+            assertTrue("p=$p tilt=$tilt 两条直角边不在纸角上相交", bisLen > 0.5f)
             val unit = Offset(bisector.x / bisLen, bisector.y / bisLen)
             val width = radius * CURL3D_BACK_SHADOW_WIDTH
             val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
@@ -699,7 +678,7 @@ class Curl3DRenderTest {
             if (near.x < 6f || near.x > w - 6f || near.y < 6f || near.y > h - 6f) continue
             if (far.x < 2f || far.x > w - 2f || far.y < 2f || far.y > h - 2f) continue
             assertTrue(
-                "p=$p tilt=$tilt dir=$dir 纸角转角处没有影（两条影带中间空着）：角外 ${lumaAt(near)} / 更远处 ${lumaAt(far)}",
+                "p=$p tilt=$tilt 纸角转角处没有影（两条影带中间空着）：角外 ${lumaAt(near)} / 更远处 ${lumaAt(far)}",
                 lumaAt(near) < lumaAt(far) - 0.02f,
             )
         }
@@ -716,25 +695,22 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         val mid = h / 2
-        for (dir in listOf(1, -1)) {
-            val p = 0.45f
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir)
-            val radius = curlRadius(shape)
-            val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
-            val flap = w * p - PI.toFloat() * radius
-            val outward = if (dir >= 0) -1f else 1f
-            fun luma(x: Int): Float {
-                val c = px[x, mid]
-                return (c.red + c.green + c.blue) / 3f
-            }
-            // 靠纸卷那一头：整片纸背都压暗时这里和正面差得最多。
-            val back = luma((shape.foldX + outward * flap * 0.20f).toInt())
-            val front = luma((shape.foldX + outward * flap * 1.70f).toInt())
-            assertTrue(
-                "dir=$dir 反面比正面暗了 ${front - back}（反面就是同一张纸的另一面）",
-                front - back < 0.042f,
-            )
+        val p = 0.45f
+        val shape = curlShape(w.toFloat(), h.toFloat(), p)
+        val radius = curlRadius(shape)
+        val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+        val flap = w * p - PI.toFloat() * radius
+        fun luma(x: Int): Float {
+            val c = px[x, mid]
+            return (c.red + c.green + c.blue) / 3f
         }
+        // 靠纸卷那一头：整片纸背都压暗时这里和正面差得最多。
+        val back = luma((shape.foldX - flap * 0.20f).toInt())
+        val front = luma((shape.foldX - flap * 1.70f).toInt())
+        assertTrue(
+            "反面比正面暗了 ${front - back}（反面就是同一张纸的另一面）",
+            front - back < 0.042f,
+        )
     }
 
     /**
@@ -749,30 +725,27 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         val mid = h / 2
-        for (dir in listOf(1, -1)) {
-            val p = 0.45f
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir)
-            val white = 0xFFFFFFFF.toInt()
-            val px = render(shape, solid(w, h, white), solid(w, h, white)).toPixelMap()
-            fun luma(x: Int): Float {
-                val c = px[x, mid]
-                return (c.red + c.green + c.blue) / 3f
-            }
-            val fold = shape.foldX.toInt()
-            val step = if (dir >= 0) 1 else -1
-            var worst = 0f
-            var at = 0
-            // 从纸卷这一侧扫到纸背那一侧，跨过切线（只在筒根这一小段量，再远就是落影自己的边）。
-            for (k in -10..10) {
-                val x = fold + k * step
-                val d = abs(luma(x) - luma(x + step))
-                if (d > worst) {
-                    worst = d
-                    at = x
-                }
-            }
-            assertTrue("dir=$dir 筒底出现台阶：x=$at 处相邻像素跳了 $worst", worst < 0.02f)
+        val p = 0.45f
+        val shape = curlShape(w.toFloat(), h.toFloat(), p)
+        val white = 0xFFFFFFFF.toInt()
+        val px = render(shape, solid(w, h, white), solid(w, h, white)).toPixelMap()
+        fun luma(x: Int): Float {
+            val c = px[x, mid]
+            return (c.red + c.green + c.blue) / 3f
         }
+        val fold = shape.foldX.toInt()
+        var worst = 0f
+        var at = 0
+        // 从纸卷这一侧扫到纸背那一侧，跨过切线（只在筒根这一小段量，再远就是落影自己的边）。
+        for (k in -10..10) {
+            val x = fold + k
+            val d = abs(luma(x) - luma(x + 1))
+            if (d > worst) {
+                worst = d
+                at = x
+            }
+        }
+        assertTrue("筒底出现台阶：x=$at 处相邻像素跳了 $worst", worst < 0.02f)
     }
 
     /** 点在多边形内（射线法）：纸卷各段的轮廓都是简单多边形，够用。 */
@@ -809,65 +782,63 @@ class Curl3DRenderTest {
         val h = 600
         val plain = luma(Color(paper))
         for ((p, tilt) in listOf(0.3f to 0.25f, 0.45f to 0.35f, 0.6f to 0f)) {
-            for (dir in listOf(1, -1)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                val mesh = buildCurlMesh(shape, curlRadius(shape))
-                val edges = mesh.pageEdges() ?: continue
-                val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
-                if (back.lastRow - back.firstRow < 2) continue
-                val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
-                fun lumaAt(x: Int, y: Int): Float {
-                    val c = px[x, y]
-                    return (c.red + c.green + c.blue) / 3f
-                }
-                var checked = 0
-                for (k in 0..1) {
-                    val edge = edges[k]
-                    val other = edges[1 - k]
-                    // 两头各留 3 行：折痕端接着纸卷，纸角端距纸的自由边不到 1px，
-                    // 沿法向量的 3px 会落到纸外（那是旧页上的影，本来就该有）。
-                    var i = back.firstRow + 3
-                    while (i <= back.lastRow - 3) {
-                        val at = edge[i]
-                        val across = other[i] - at
-                        // 页边切线取前后两点的差，法向再与之垂直；纸在 `other` 那一侧。
-                        val before = edge[maxOf(i - 1, 0)]
-                        val after = edge[minOf(i + 1, edge.size - 1)]
-                        val tx = after.x - before.x
-                        val ty = after.y - before.y
-                        val tl = hypot(tx, ty)
-                        if (tl < 1e-3f) {
-                            i += 5
-                            continue
-                        }
-                        var nx = -ty / tl
-                        var ny = tx / tl
-                        val len = hypot(across.x, across.y)
-                        // 纸角附近纸太窄（扫线几乎与页边平行），法向判不准，量不到「纸面里侧」。
-                        if (len < 60f || abs(nx * across.x + ny * across.y) / len < 0.3f) {
-                            i += 5
-                            continue
-                        }
-                        if (nx * across.x + ny * across.y < 0f) {
-                            nx = -nx
-                            ny = -ny
-                        }
-                        for (d in listOf(3f, 6f, 12f)) {
-                            val x = (at.x + nx * d).roundToInt()
-                            val y = (at.y + ny * d).roundToInt()
-                            if (x < 2 || x > w - 3 || y < 2 || y > h - 3) continue
-                            checked++
-                            assertTrue(
-                                "p=$p dir=$dir 页边内侧 ${d}px ($x,$y) 比纸面暗了 " +
-                                    "${plain - lumaAt(x, y)} —— 影铺到纸背上了",
-                                lumaAt(x, y) >= plain - 0.02f,
-                            )
-                        }
-                        i += 5
-                    }
-                }
-                assertTrue("p=$p dir=$dir 没量到纸背，测试没测到东西", checked > 0)
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
+            val mesh = buildCurlMesh(shape, curlRadius(shape))
+            val edges = mesh.pageEdges() ?: continue
+            val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
+            if (back.lastRow - back.firstRow < 2) continue
+            val px = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+            fun lumaAt(x: Int, y: Int): Float {
+                val c = px[x, y]
+                return (c.red + c.green + c.blue) / 3f
             }
+            var checked = 0
+            for (k in 0..1) {
+                val edge = edges[k]
+                val other = edges[1 - k]
+                // 两头各留 3 行：折痕端接着纸卷，纸角端距纸的自由边不到 1px，
+                // 沿法向量的 3px 会落到纸外（那是旧页上的影，本来就该有）。
+                var i = back.firstRow + 3
+                while (i <= back.lastRow - 3) {
+                    val at = edge[i]
+                    val across = other[i] - at
+                    // 页边切线取前后两点的差，法向再与之垂直；纸在 `other` 那一侧。
+                    val before = edge[maxOf(i - 1, 0)]
+                    val after = edge[minOf(i + 1, edge.size - 1)]
+                    val tx = after.x - before.x
+                    val ty = after.y - before.y
+                    val tl = hypot(tx, ty)
+                    if (tl < 1e-3f) {
+                        i += 5
+                        continue
+                    }
+                    var nx = -ty / tl
+                    var ny = tx / tl
+                    val len = hypot(across.x, across.y)
+                    // 纸角附近纸太窄（扫线几乎与页边平行），法向判不准，量不到「纸面里侧」。
+                    if (len < 60f || abs(nx * across.x + ny * across.y) / len < 0.3f) {
+                        i += 5
+                        continue
+                    }
+                    if (nx * across.x + ny * across.y < 0f) {
+                        nx = -nx
+                        ny = -ny
+                    }
+                    for (d in listOf(3f, 6f, 12f)) {
+                        val x = (at.x + nx * d).roundToInt()
+                        val y = (at.y + ny * d).roundToInt()
+                        if (x < 2 || x > w - 3 || y < 2 || y > h - 3) continue
+                        checked++
+                        assertTrue(
+                            "p=$p 页边内侧 ${d}px ($x,$y) 比纸面暗了 " +
+                                "${plain - lumaAt(x, y)} —— 影铺到纸背上了",
+                            lumaAt(x, y) >= plain - 0.02f,
+                        )
+                    }
+                    i += 5
+                }
+            }
+            assertTrue("p=$p 没量到纸背，测试没测到东西", checked > 0)
         }
     }
 
@@ -883,101 +854,99 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         for ((p, tilt) in listOf(0.3f to 0.25f, 0.45f to 0.35f)) {
-            for (dir in listOf(1, -1)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                val radius = curlRadius(shape)
-                val mesh = buildCurlMesh(shape, radius)
-                val edges = mesh.pageEdges() ?: continue
-                val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
-                if (back.lastRow - back.firstRow < 2) continue
-                val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
-                assertTrue("p=$p dir=$dir 纸背已经露出来了，却找不到收尾那一行", taperFrom != null)
-                val top = Offset(shape.topX, 0f)
-                val foldLen = hypot(shape.bottomX - shape.topX, h.toFloat())
-                val ux = (shape.bottomX - shape.topX) / foldLen
-                val uy = h.toFloat() / foldLen
-                for (k in 0..1) {
-                    val pt = edges[k][taperFrom!!]
-                    val d = abs((pt.x - top.x) * uy - (pt.y - top.y) * ux)
-                    assertTrue("p=$p dir=$dir 收尾处离折痕 ${d}px，筒径 $radius", abs(d - radius) < 2.5f)
-                }
-                val on = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
-                val off = render(shape.copy(shadowFade = 0f), solid(w, h, paper), solid(w, h, paper)).toPixelMap()
-                fun luma(map: androidx.compose.ui.graphics.PixelMap, x: Int, y: Int): Float {
-                    val c = map[x, y]
-                    return (c.red + c.green + c.blue) / 3f
-                }
-                var hookChecked = 0
-                var keptChecked = 0
-                for (k in 0..1) {
-                    val edge = edges[k]
-                    val outward = outwardNormals(mesh, shape, radius, k, edge, taperFrom!!) ?: continue
-                    // 收尾之前（绕筒退回折痕的钩子）：不许有影。
-                    //
-                    // 采样点取**影带那一侧**，不是钩子那一行自己的材料外法向：纸绕过筒顶之后
-                    // 材料外法向已经跟着翻面、指回正面那一侧，而正面那一侧本来就有纸卷的落影
-                    // （那是另一条影，收尾之前就该在）。影带从收尾那一行起铺，所以侧别按收尾
-                    // 那一行定，钩子各行沿自己的折线法向偏移。
-                    fun normalAt(e: List<Offset>, at: Int): Offset {
-                        val a = e[maxOf(at - 1, 0)]
-                        val b = e[minOf(at + 1, e.size - 1)]
-                        val dx = b.x - a.x
-                        val dy = b.y - a.y
-                        val len = hypot(dx, dy)
-                        return if (len < 1e-3f) Offset.Zero else Offset(dy / len, -dx / len)
-                    }
-                    val band = outward[taperFrom]
-                    val taperNormal = normalAt(edge, taperFrom)
-                    val bandSign = if (taperNormal.x * band.x + taperNormal.y * band.y >= 0f) 1f else -1f
-                    var i = 4
-                    while (i <= taperFrom - 3) {
-                        val at = edge[i]
-                        val o = normalAt(edge, i) * bandSign
-                        val x = (at.x + o.x * 6f).roundToInt()
-                        val y = (at.y + o.y * 6f).roundToInt()
-                        if (x < 2 || x > w - 3 || y < 2 || y > h - 3 || luma(off, x, y) < 0.9f) {
-                            i += 4
-                            continue
-                        }
-                        hookChecked++
-                        assertTrue(
-                            "p=$p dir=$dir 收尾之前的钩子 (${at.x.toInt()},${at.y.toInt()}) 还在铺影",
-                            abs(luma(on, x, y) - luma(off, x, y)) < 0.01f,
-                        )
-                        i += 4
-                    }
-                    // 收尾之后（卷筒曲线段 + 平铺段）：影要在，宽度按收尾起算的归一化弧长。
-                    var cumT = 0f
-                    val tAt = FloatArray(edge.size)
-                    for (i in taperFrom + 1 until edge.size) {
-                        cumT += (edge[i] - edge[i - 1]).getDistance()
-                        tAt[i] = cumT
-                    }
-                    if (cumT < 1f) continue
-                    for (i in taperFrom + 1 until edge.size) tAt[i] /= cumT
-                    var j = taperFrom + 4
-                    while (j <= edge.size - 4) {
-                        val at = edge[j]
-                        val o = outward[j]
-                        val x = (at.x + o.x * 3f).roundToInt()
-                        val y = (at.y + o.y * 3f).roundToInt()
-                        if (x < 2 || x > w - 3 || y < 2 || y > h - 3 ||
-                            radius * CURL3D_BACK_SHADOW_WIDTH * tAt[j] < 10f
-                        ) {
-                            j += 4
-                            continue
-                        }
-                        keptChecked++
-                        assertTrue(
-                            "p=$p dir=$dir 收尾之后的页边 (${at.x.toInt()},${at.y.toInt()}) 没有影",
-                            luma(on, x, y) < luma(off, x, y) - 0.008f,
-                        )
-                        j += 4
-                    }
-                }
-                assertTrue("p=$p dir=$dir 没量到钩子，测试没测到东西", hookChecked > 0)
-                assertTrue("p=$p dir=$dir 没量到收尾之后的影，测试没测到东西", keptChecked > 0)
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
+            val radius = curlRadius(shape)
+            val mesh = buildCurlMesh(shape, radius)
+            val edges = mesh.pageEdges() ?: continue
+            val back = mesh.bands.firstOrNull { it.surface == CurlMesh.Surface.Back } ?: continue
+            if (back.lastRow - back.firstRow < 2) continue
+            val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
+            assertTrue("p=$p 纸背已经露出来了，却找不到收尾那一行", taperFrom != null)
+            val top = Offset(shape.topX, 0f)
+            val foldLen = hypot(shape.bottomX - shape.topX, h.toFloat())
+            val ux = (shape.bottomX - shape.topX) / foldLen
+            val uy = h.toFloat() / foldLen
+            for (k in 0..1) {
+                val pt = edges[k][taperFrom!!]
+                val d = abs((pt.x - top.x) * uy - (pt.y - top.y) * ux)
+                assertTrue("p=$p 收尾处离折痕 ${d}px，筒径 $radius", abs(d - radius) < 2.5f)
             }
+            val on = render(shape, solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+            val off = render(shape.copy(shadowFade = 0f), solid(w, h, paper), solid(w, h, paper)).toPixelMap()
+            fun luma(map: androidx.compose.ui.graphics.PixelMap, x: Int, y: Int): Float {
+                val c = map[x, y]
+                return (c.red + c.green + c.blue) / 3f
+            }
+            var hookChecked = 0
+            var keptChecked = 0
+            for (k in 0..1) {
+                val edge = edges[k]
+                val outward = outwardNormals(mesh, shape, radius, k, edge, taperFrom!!) ?: continue
+                // 收尾之前（绕筒退回折痕的钩子）：不许有影。
+                //
+                // 采样点取**影带那一侧**，不是钩子那一行自己的材料外法向：纸绕过筒顶之后
+                // 材料外法向已经跟着翻面、指回正面那一侧，而正面那一侧本来就有纸卷的落影
+                // （那是另一条影，收尾之前就该在）。影带从收尾那一行起铺，所以侧别按收尾
+                // 那一行定，钩子各行沿自己的折线法向偏移。
+                fun normalAt(e: List<Offset>, at: Int): Offset {
+                    val a = e[maxOf(at - 1, 0)]
+                    val b = e[minOf(at + 1, e.size - 1)]
+                    val dx = b.x - a.x
+                    val dy = b.y - a.y
+                    val len = hypot(dx, dy)
+                    return if (len < 1e-3f) Offset.Zero else Offset(dy / len, -dx / len)
+                }
+                val band = outward[taperFrom]
+                val taperNormal = normalAt(edge, taperFrom)
+                val bandSign = if (taperNormal.x * band.x + taperNormal.y * band.y >= 0f) 1f else -1f
+                var i = 4
+                while (i <= taperFrom - 3) {
+                    val at = edge[i]
+                    val o = normalAt(edge, i) * bandSign
+                    val x = (at.x + o.x * 6f).roundToInt()
+                    val y = (at.y + o.y * 6f).roundToInt()
+                    if (x < 2 || x > w - 3 || y < 2 || y > h - 3 || luma(off, x, y) < 0.9f) {
+                        i += 4
+                        continue
+                    }
+                    hookChecked++
+                    assertTrue(
+                        "p=$p 收尾之前的钩子 (${at.x.toInt()},${at.y.toInt()}) 还在铺影",
+                        abs(luma(on, x, y) - luma(off, x, y)) < 0.01f,
+                    )
+                    i += 4
+                }
+                // 收尾之后（卷筒曲线段 + 平铺段）：影要在，宽度按收尾起算的归一化弧长。
+                var cumT = 0f
+                val tAt = FloatArray(edge.size)
+                for (i in taperFrom + 1 until edge.size) {
+                    cumT += (edge[i] - edge[i - 1]).getDistance()
+                    tAt[i] = cumT
+                }
+                if (cumT < 1f) continue
+                for (i in taperFrom + 1 until edge.size) tAt[i] /= cumT
+                var j = taperFrom + 4
+                while (j <= edge.size - 4) {
+                    val at = edge[j]
+                    val o = outward[j]
+                    val x = (at.x + o.x * 3f).roundToInt()
+                    val y = (at.y + o.y * 3f).roundToInt()
+                    if (x < 2 || x > w - 3 || y < 2 || y > h - 3 ||
+                        radius * CURL3D_BACK_SHADOW_WIDTH * tAt[j] < 10f
+                    ) {
+                        j += 4
+                        continue
+                    }
+                    keptChecked++
+                    assertTrue(
+                        "p=$p 收尾之后的页边 (${at.x.toInt()},${at.y.toInt()}) 没有影",
+                        luma(on, x, y) < luma(off, x, y) - 0.008f,
+                    )
+                    j += 4
+                }
+            }
+            assertTrue("p=$p 没量到钩子，测试没测到东西", hookChecked > 0)
+            assertTrue("p=$p 没量到收尾之后的影，测试没测到东西", keptChecked > 0)
         }
     }
 
@@ -1005,37 +974,34 @@ class Curl3DRenderTest {
             drawRect(Color(ink), topLeft = Offset(tw * 0.40f, th - 2f), size = Size(tw * 0.20f, 2f))
         }
         val paperLuma = luma(Color(paper))
-        for (dir in listOf(1, -1)) {
-            val p = 0.45f
-            val shape = curlShape(w.toFloat(), h.toFloat(), p, dir)
-            val radius = curlRadius(shape)
-            val px = render(
-                shape,
-                body,
-                body,
-                frontTex = Offset(margin.toFloat(), margin.toFloat()),
-                backTex = Offset(margin.toFloat(), margin.toFloat()),
-            ).toPixelMap()
-            val inward = if (dir >= 0) -1f else 1f
-            val flap = w * p - PI.toFloat() * radius
-            // 纸背 = 折痕往「没掀起」一侧退（掀起长度 − πR）；页边距那一段在它外沿往里 margin。
-            val bandStart = shape.foldX + inward * flap
-            val marginStart = bandStart - inward * margin
-            var checked = 0
-            for (k in 1..3) {
-                val x = (bandStart + (marginStart - bandStart) * k / 4f).toInt()
-                // 右缘那一列墨会在整条页边距上抹出横线（y 跟着版心那一列走）；下缘那一行墨在底部。
-                for (y in listOf((h * 0.45f).toInt(), (h * 0.55f).toInt(), h - margin / 2)) {
-                    val got = luma(px[x, y])
-                    assertTrue(
-                        "dir=$dir 纸背页边距 ($x,$y) 出现 $got，纸面应为 $paperLuma —— 版心边列被抹开了",
-                        abs(got - paperLuma) < 0.02f,
-                    )
-                    checked++
-                }
+        val p = 0.45f
+        val shape = curlShape(w.toFloat(), h.toFloat(), p)
+        val radius = curlRadius(shape)
+        val px = render(
+            shape,
+            body,
+            body,
+            frontTex = Offset(margin.toFloat(), margin.toFloat()),
+            backTex = Offset(margin.toFloat(), margin.toFloat()),
+        ).toPixelMap()
+        val flap = w * p - PI.toFloat() * radius
+        // 纸背 = 折痕往「没掀起」一侧退（掀起长度 − πR）；页边距那一段在它外沿往里 margin。
+        val bandStart = shape.foldX - flap
+        val marginStart = bandStart + margin
+        var checked = 0
+        for (k in 1..3) {
+            val x = (bandStart + (marginStart - bandStart) * k / 4f).toInt()
+            // 右缘那一列墨会在整条页边距上抹出横线（y 跟着版心那一列走）；下缘那一行墨在底部。
+            for (y in listOf((h * 0.45f).toInt(), (h * 0.55f).toInt(), h - margin / 2)) {
+                val got = luma(px[x, y])
+                assertTrue(
+                    "纸背页边距 ($x,$y) 出现 $got，纸面应为 $paperLuma —— 版心边列被抹开了",
+                    abs(got - paperLuma) < 0.02f,
+                )
+                checked++
             }
-            assertTrue("dir=$dir 页边距没采样到", checked > 0)
         }
+        assertTrue("页边距没采样到", checked > 0)
     }
 
     /**
@@ -1067,37 +1033,35 @@ class Curl3DRenderTest {
             0.12f to -0.6139f,
             0.40f to 0.653f,
         )) {
-            for (dir in listOf(1, -1)) {
-                val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                val px = render(
-                    shape,
-                    body,
-                    body,
-                    frontTex = Offset(margin.toFloat(), margin.toFloat()),
-                    backTex = Offset(margin.toFloat(), margin.toFloat()),
-                ).toPixelMap()
-                var longest = 0
-                var where = ""
-                for (y in 0 until h) {
-                    var run = 0
-                    for (x in 0 until w) {
-                        val c = px[x, y]
-                        if ((c.red + c.green + c.blue) / 3f < 0.4f) {
-                            run++
-                            if (run > longest) {
-                                longest = run
-                                where = "(${x - run + 1}..$x, $y)"
-                            }
-                        } else {
-                            run = 0
+            val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
+            val px = render(
+                shape,
+                body,
+                body,
+                frontTex = Offset(margin.toFloat(), margin.toFloat()),
+                backTex = Offset(margin.toFloat(), margin.toFloat()),
+            ).toPixelMap()
+            var longest = 0
+            var where = ""
+            for (y in 0 until h) {
+                var run = 0
+                for (x in 0 until w) {
+                    val c = px[x, y]
+                    if ((c.red + c.green + c.blue) / 3f < 0.4f) {
+                        run++
+                        if (run > longest) {
+                            longest = run
+                            where = "(${x - run + 1}..$x, $y)"
                         }
+                    } else {
+                        run = 0
                     }
                 }
-                assertTrue(
-                    "dir=$dir p=$p tilt=$tilt 版心边列被抹成了横线：$where 连了 $longest px",
-                    longest <= 24,
-                )
             }
+            assertTrue(
+                "p=$p tilt=$tilt 版心边列被抹成了横线：$where 连了 $longest px",
+                longest <= 24,
+            )
         }
     }
 
@@ -1115,25 +1079,22 @@ class Curl3DRenderTest {
         val mid = h / 2
         val redBody = solid(200, 300, red)
         val blueBody = solid(200, 300, blue)
-        for (dir in listOf(1, -1)) {
-            val shape = curlShape(w.toFloat(), h.toFloat(), 0.45f, dir)
-            val radius = curlRadius(shape)
-            val px = render(shape, redBody, blueBody, frontTex = Offset(100f, 150f), backTex = Offset(100f, 150f))
-                .toPixelMap()
-            val inward = if (dir >= 0) 1f else -1f
-            var checked = 0
-            for (k in 1..3) {
-                val x = (shape.foldX + inward * radius * (1f - k / 4f)).toInt()
-                val c = px[x, mid]
-                val spread = maxOf(c.red, c.green, c.blue) - minOf(c.red, c.green, c.blue)
-                assertTrue(
-                    "dir=$dir 纸卷 ($x,$mid) 透出了底下的内容（$c）—— 版心之外那一段没有垫纸色",
-                    spread < 0.06f,
-                )
-                checked++
-            }
-            assertTrue("dir=$dir 纸卷没采样到", checked > 0)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.45f)
+        val radius = curlRadius(shape)
+        val px = render(shape, redBody, blueBody, frontTex = Offset(100f, 150f), backTex = Offset(100f, 150f))
+            .toPixelMap()
+        var checked = 0
+        for (k in 1..3) {
+            val x = (shape.foldX + radius * (1f - k / 4f)).toInt()
+            val c = px[x, mid]
+            val spread = maxOf(c.red, c.green, c.blue) - minOf(c.red, c.green, c.blue)
+            assertTrue(
+                "纸卷 ($x,$mid) 透出了底下的内容（$c）—— 版心之外那一段没有垫纸色",
+                spread < 0.06f,
+            )
+            checked++
         }
+        assertTrue("纸卷没采样到", checked > 0)
     }
 
     /**
@@ -1160,52 +1121,50 @@ class Curl3DRenderTest {
         val front = solid(bw, bh, paper)
         val back = solid(bw, bh, 0xFFE020A0.toInt())
         for (p in listOf(0.15f, 0.3f, 0.45f, 0.6f, 0.8f)) {
-            for (dir in listOf(1, -1)) {
-                for (tilt in listOf(0f, 0.3f)) {
-                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                    val mesh = buildCurlMesh(shape, curlRadius(shape))
-                    if (mesh.indexCount == 0) continue
-                    val px = render(shape, front, back, frontTex = tex, backTex = tex).toPixelMap()
-                    var worst = 0
-                    var where = ""
-                    for (band in mesh.bands) {
-                        val ring = mesh.bandOutline(band)
-                        if (ring.size < 3) continue
-                        val ranges = fillRanges(ring, w, h)
-                        for (y in 0 until h) {
-                            val rg = ranges[y] ?: continue
-                            var k = 0
-                            while (k + 1 < rg.size) {
-                                // 边上的抗锯齿是另一码事，只判轮廓内侧 2px 以外。
-                                for (x in (rg[k] + 2)..(rg[k + 1] - 2)) {
-                                    if (x < 0 || x >= w) continue
-                                    val c = px[x, y]
-                                    val magenta = c.red > 0.6f && c.blue > 0.35f && c.green < 0.35f
-                                    if (magenta) {
-                                        var run = 1
-                                        while (x + run < rg[k + 1] - 2 && run < 64) {
-                                            val c2 = px[x + run, y]
-                                            if (!(c2.red > 0.6f && c2.blue > 0.35f && c2.green < 0.35f)) break
-                                            run++
-                                        }
-                                        if (run > worst) {
-                                            worst = run
-                                            where = "${band.surface}($x..${x + run - 1}, $y)"
-                                        }
-                                        k += 2
-                                        break
+            for (tilt in listOf(0f, 0.3f)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
+                val mesh = buildCurlMesh(shape, curlRadius(shape))
+                if (mesh.indexCount == 0) continue
+                val px = render(shape, front, back, frontTex = tex, backTex = tex).toPixelMap()
+                var worst = 0
+                var where = ""
+                for (band in mesh.bands) {
+                    val ring = mesh.bandOutline(band)
+                    if (ring.size < 3) continue
+                    val ranges = fillRanges(ring, w, h)
+                    for (y in 0 until h) {
+                        val rg = ranges[y] ?: continue
+                        var k = 0
+                        while (k + 1 < rg.size) {
+                            // 边上的抗锯齿是另一码事，只判轮廓内侧 2px 以外。
+                            for (x in (rg[k] + 2)..(rg[k + 1] - 2)) {
+                                if (x < 0 || x >= w) continue
+                                val c = px[x, y]
+                                val magenta = c.red > 0.6f && c.blue > 0.35f && c.green < 0.35f
+                                if (magenta) {
+                                    var run = 1
+                                    while (x + run < rg[k + 1] - 2 && run < 64) {
+                                        val c2 = px[x + run, y]
+                                        if (!(c2.red > 0.6f && c2.blue > 0.35f && c2.green < 0.35f)) break
+                                        run++
                                     }
+                                    if (run > worst) {
+                                        worst = run
+                                        where = "${band.surface}($x..${x + run - 1}, $y)"
+                                    }
+                                    k += 2
+                                    break
                                 }
-                                if (worst >= 64) break
-                                k += 2
                             }
+                            if (worst >= 64) break
+                            k += 2
                         }
                     }
-                    assertTrue(
-                        "p=$p dir=$dir tilt=$tilt 纸带里漏出了露出页：$where 连了 $worst px",
-                        worst <= 2,
-                    )
                 }
+                assertTrue(
+                    "p=$p tilt=$tilt 纸带里漏出了露出页：$where 连了 $worst px",
+                    worst <= 2,
+                )
             }
         }
     }
@@ -1254,55 +1213,53 @@ class Curl3DRenderTest {
         val body = solid(778, 1114, 0xFF202020.toInt())
         val bodyTex = Offset(61f, 93f)
         for (p in listOf(0.25f, 0.40f, 0.55f)) {
-            for (dir in listOf(1, -1)) {
-                for (tilt in listOf(0f, 0.2f, 0.35f)) {
-                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                    val pm = render(shape, body, body, frontTex = bodyTex, backTex = bodyTex)
-                        .toPixelMap()
-                    fun lum(xx: Int, yy: Int): Float {
-                        val c = pm[xx.coerceIn(0, w - 1), yy.coerceIn(0, h - 1)]
-                        return (c.red + c.green + c.blue) / 3f
-                    }
-                    /** 折痕附近 5×5 里最亮的一格：用来判断**真的有纸**贴在这儿，还是只是两条边的抗锯齿。 */
-                    fun boxMax(xx: Int, yy: Int): Float {
-                        var best = 0f
-                        for (dy in -2..2) for (dx in -2..2) best = maxOf(best, lum(xx + dx, yy + dy))
-                        return best
-                    }
-                    var worst = 0f
-                    var where = ""
-                    var judged = 0
-                    for (y in 200 until h - 200 step 2) {
-                        val x = (shape.topX + (shape.bottomX - shape.topX) * y.toFloat() / h).roundToInt()
-                        if (x < 2 || x > w - 3) continue
-                        val l = lum(x - 1, y)
-                        val m = lum(x, y)
-                        val r = lum(x + 1, y)
-                        // 折痕自己或任一侧已经是纸色：这一行是页边距压着折痕，跳过。
-                        // 两侧明暗差得远（一侧纸、一侧正文）说明这一行是**内容边界**，缝判不出来。
-                        if (m >= 0.9f || l >= 0.9f || r >= 0.9f) continue
-                        // 折痕正好压在**正文块的角**（或页边拐角）上时，那一列的纸边覆盖率是
-                        // 0 与 1 之间的某个值，比两侧亮是「纸 / 墨」的抗锯齿，不是缝。
-                        // 判据取「5×5 里有没有一整格纸色」（满纸色约 0.93）：真缝只是相邻两条边
-                        // 各自抗锯齿、覆盖率合不成 1，峰值实测只有 0.5 上下，不会被误跳。
-                        if (boxMax(x, y) >= 0.9f) continue
-                        if (abs(l - r) > 0.2f) continue
-                        judged++
-                        val gap = m - (l + r) / 2f
-                        if (gap > worst) {
-                            worst = gap
-                            where = "($x,$y) 折痕=${"%.3f".format(m)} 左=${"%.3f".format(l)} " +
-                                "右=${"%.3f".format(r)}"
-                        }
-                    }
-                    if (tilt != 0f) {
-                        assertTrue("p=$p dir=$dir tilt=$tilt 折痕没有一行落在正文里，判据是空的", judged > 0)
-                    }
-                    assertTrue(
-                        "p=$p dir=$dir tilt=$tilt 折痕上有一条比两侧都亮的接缝线：$where",
-                        worst <= 0.08f,
-                    )
+            for (tilt in listOf(0f, 0.2f, 0.35f)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
+                val pm = render(shape, body, body, frontTex = bodyTex, backTex = bodyTex)
+                    .toPixelMap()
+                fun lum(xx: Int, yy: Int): Float {
+                    val c = pm[xx.coerceIn(0, w - 1), yy.coerceIn(0, h - 1)]
+                    return (c.red + c.green + c.blue) / 3f
                 }
+                /** 折痕附近 5×5 里最亮的一格：用来判断**真的有纸**贴在这儿，还是只是两条边的抗锯齿。 */
+                fun boxMax(xx: Int, yy: Int): Float {
+                    var best = 0f
+                    for (dy in -2..2) for (dx in -2..2) best = maxOf(best, lum(xx + dx, yy + dy))
+                    return best
+                }
+                var worst = 0f
+                var where = ""
+                var judged = 0
+                for (y in 200 until h - 200 step 2) {
+                    val x = (shape.topX + (shape.bottomX - shape.topX) * y.toFloat() / h).roundToInt()
+                    if (x < 2 || x > w - 3) continue
+                    val l = lum(x - 1, y)
+                    val m = lum(x, y)
+                    val r = lum(x + 1, y)
+                    // 折痕自己或任一侧已经是纸色：这一行是页边距压着折痕，跳过。
+                    // 两侧明暗差得远（一侧纸、一侧正文）说明这一行是**内容边界**，缝判不出来。
+                    if (m >= 0.9f || l >= 0.9f || r >= 0.9f) continue
+                    // 折痕正好压在**正文块的角**（或页边拐角）上时，那一列的纸边覆盖率是
+                    // 0 与 1 之间的某个值，比两侧亮是「纸 / 墨」的抗锯齿，不是缝。
+                    // 判据取「5×5 里有没有一整格纸色」（满纸色约 0.93）：真缝只是相邻两条边
+                    // 各自抗锯齿、覆盖率合不成 1，峰值实测只有 0.5 上下，不会被误跳。
+                    if (boxMax(x, y) >= 0.9f) continue
+                    if (abs(l - r) > 0.2f) continue
+                    judged++
+                    val gap = m - (l + r) / 2f
+                    if (gap > worst) {
+                        worst = gap
+                        where = "($x,$y) 折痕=${"%.3f".format(m)} 左=${"%.3f".format(l)} " +
+                            "右=${"%.3f".format(r)}"
+                    }
+                }
+                if (tilt != 0f) {
+                    assertTrue("p=$p tilt=$tilt 折痕没有一行落在正文里，判据是空的", judged > 0)
+                }
+                assertTrue(
+                    "p=$p tilt=$tilt 折痕上有一条比两侧都亮的接缝线：$where",
+                    worst <= 0.08f,
+                )
             }
         }
     }
@@ -1325,54 +1282,51 @@ class Curl3DRenderTest {
             0.7f to -0.36f,
             0.7f to 0.36f,
         )) {
-            for (dir in listOf(1, -1)) {
-                val shape = curlShape(w, h, p, dir, tilt)
-                val radius = curlRadius(shape)
-                val mesh = buildCurlMesh(shape, radius = radius, splits = CURL3D_SPLITS)
-                val foldLen = hypot(shape.bottomX - shape.topX, h).coerceAtLeast(1e-3f)
-                val up = Offset(h / foldLen, -(shape.bottomX - shape.topX) / foldLen) *
-                    (if (dir >= 0) 1f else -1f)
-                val strip = mesh.rollShadowStrip(radius * 0.5f, up)
-                assertTrue("dir=$dir p=$p tilt=$tilt 没有落影", strip != null)
+            val shape = curlShape(w, h, p, tilt)
+            val radius = curlRadius(shape)
+            val mesh = buildCurlMesh(shape, radius = radius, splits = CURL3D_SPLITS)
+            val foldLen = hypot(shape.bottomX - shape.topX, h).coerceAtLeast(1e-3f)
+            val up = Offset(h / foldLen, -(shape.bottomX - shape.topX) / foldLen)
+            val strip = mesh.rollShadowStrip(radius * 0.5f, up)
+            assertTrue("p=$p tilt=$tilt 没有落影", strip != null)
 
-                val pw = w.toInt()
-                val ph = h.toInt()
-                val img = ImageBitmap(pw, ph, ImageBitmapConfig.Argb8888, hasAlpha = true)
-                CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w, h)) {
-                    drawPath(strip!!, Color.Black)
+            val pw = w.toInt()
+            val ph = h.toInt()
+            val img = ImageBitmap(pw, ph, ImageBitmapConfig.Argb8888, hasAlpha = true)
+            CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(img), Size(w, h)) {
+                drawPath(strip!!, Color.Black)
+            }
+            val px = img.toPixelMap()
+            fun dark(x: Int, y: Int): Boolean = px[x, y].alpha > 0.5f
+            // 纸的轮廓（纸卷在屏幕上的那块）：影必须从它边上起，不能留缝。
+            val ring = mesh.bandOutline(mesh.bands.first { it.surface == CurlMesh.Surface.Recto })
+            var hugged = 0
+            for (k in ring.indices) {
+                val p = ring[k]
+                if (p.x < 1f || p.y < 1f || p.x > w - 2f || p.y > h - 2f) continue
+                // 轮廓上这点沿法向挪 2px（朝外的那侧由「描出来的影」自己判）
+                var near = false
+                for (d in listOf(-2f, 2f)) {
+                    val x = (p.x + up.x * d).toInt()
+                    val y = (p.y + up.y * d).toInt()
+                    if (x in 0 until pw && y in 0 until ph && dark(x, y)) near = true
                 }
-                val px = img.toPixelMap()
-                fun dark(x: Int, y: Int): Boolean = px[x, y].alpha > 0.5f
-                // 纸的轮廓（纸卷在屏幕上的那块）：影必须从它边上起，不能留缝。
-                val ring = mesh.bandOutline(mesh.bands.first { it.surface == CurlMesh.Surface.Recto })
-                var hugged = 0
-                for (k in ring.indices) {
-                    val p = ring[k]
-                    if (p.x < 1f || p.y < 1f || p.x > w - 2f || p.y > h - 2f) continue
-                    // 轮廓上这点沿法向挪 2px（朝外的那侧由「描出来的影」自己判）
-                    var near = false
-                    for (d in listOf(-2f, 2f)) {
-                        val x = (p.x + up.x * d).toInt()
-                        val y = (p.y + up.y * d).toInt()
-                        if (x in 0 until pw && y in 0 until ph && dark(x, y)) near = true
-                    }
-                    assertTrue("dir=$dir p=$p tilt=$tilt 纸边 (${p.x}, ${p.y}) 旁边没有影", near)
-                    hugged++
-                }
-                assertTrue("dir=$dir p=$p tilt=$tilt 没量到纸边", hugged > 8)
-                // 纸被上下页边切断时，影跟着到边。
-                if (shape.topX > 1f && shape.topX < w - 1f) {
-                    assertTrue(
-                        "dir=$dir p=$p tilt=$tilt 影没顶到屏幕上边（折痕上端在页内）",
-                        (0 until pw).any { dark(it, 0) },
-                    )
-                }
-                if (shape.bottomX > 1f && shape.bottomX < w - 1f) {
-                    assertTrue(
-                        "dir=$dir p=$p tilt=$tilt 影没顶到屏幕下边（折痕下端在页内）",
-                        (0 until pw).any { dark(it, ph - 1) },
-                    )
-                }
+                assertTrue("p=$p tilt=$tilt 纸边 (${p.x}, ${p.y}) 旁边没有影", near)
+                hugged++
+            }
+            assertTrue("p=$p tilt=$tilt 没量到纸边", hugged > 8)
+            // 纸被上下页边切断时，影跟着到边。
+            if (shape.topX > 1f && shape.topX < w - 1f) {
+                assertTrue(
+                    "p=$p tilt=$tilt 影没顶到屏幕上边（折痕上端在页内）",
+                    (0 until pw).any { dark(it, 0) },
+                )
+            }
+            if (shape.bottomX > 1f && shape.bottomX < w - 1f) {
+                assertTrue(
+                    "p=$p tilt=$tilt 影没顶到屏幕下边（折痕下端在页内）",
+                    (0 until pw).any { dark(it, ph - 1) },
+                )
             }
         }
     }
@@ -1392,15 +1346,13 @@ class Curl3DRenderTest {
         val h = 1400f
         val r = w * CURL3D_RADIUS_RATIO
         // 中段（折痕离自由边远超 2.5R）：影全浓。
-        assertEquals("中段不该动影", 1f, freeEdgeShadowFade(curlShape(w, h, 0.5f, 1), r), 1e-6f)
+        assertEquals("中段不该动影", 1f, freeEdgeShadowFade(curlShape(w, h, 0.5f), r), 1e-6f)
         // 折痕贴在自由边：影归零（进度 0 时折痕就在右缘）。
-        assertEquals("贴自由边时影要归零", 0f, freeEdgeShadowFade(curlShape(w, h, 0f, 1), r), 1e-6f)
-        // 镜像几何的自由边在左缘，同样贴边归零。
-        assertEquals("镜像几何贴自由边时影要归零", 0f, freeEdgeShadowFade(curlShape(w, h, 0f, -1), r), 1e-6f)
+        assertEquals("贴自由边时影要归零", 0f, freeEdgeShadowFade(curlShape(w, h, 0f), r), 1e-6f)
         // 越靠近自由边越淡，且连续。
         var prev = -1f
         for (p in listOf(0f, 0.02f, 0.05f, 0.1f, 0.15f, 0.2f, 0.25f, 0.3f)) {
-            val fade = freeEdgeShadowFade(curlShape(w, h, p, 1), r)
+            val fade = freeEdgeShadowFade(curlShape(w, h, p), r)
             assertTrue("p=$p 影的淡出系数不该倒退", fade >= prev)
             prev = fade
         }
@@ -1420,7 +1372,7 @@ class Curl3DRenderTest {
         val h = 1300f
         val r = w * CURL3D_RADIUS_RATIO
         // 折痕贴在自由边的同一帧。
-        val atFreeEdge = curlShape(w, h, 0.1f, 1)
+        val atFreeEdge = curlShape(w, h, 0.1f)
         assertEquals(
             "下一页起手不许淡影",
             1f,
@@ -1442,7 +1394,7 @@ class Curl3DRenderTest {
         assertEquals(
             "中段不该动影",
             1f,
-            freeEdgeShadowFadeIfArriving(curlShape(w, h, 0.5f, 1), r, arriving = true),
+            freeEdgeShadowFadeIfArriving(curlShape(w, h, 0.5f), r, arriving = true),
             1e-6f,
         )
     }
@@ -1452,7 +1404,7 @@ class Curl3DRenderTest {
     fun nextPageStartKeepsTheRollShadowOnScreen() {
         val w = 600
         val h = 900
-        val shape = curlShape(w.toFloat(), h.toFloat(), 0.06f, 1, tilt = 0.4f)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.06f, tilt = 0.4f)
         fun cover(arriving: Boolean): Int {
             val on = render(shape, solid(w, h, red), solid(w, h, blue), arriving = arriving).toPixelMap()
             val off = render(shape.copy(shadowFade = 0f), solid(w, h, red), solid(w, h, blue)).toPixelMap()
@@ -1491,44 +1443,42 @@ class Curl3DRenderTest {
         val w = 400
         val h = 600
         var total = 0
-        for (dir in listOf(1, -1)) {
-            for (p in listOf(0.15f, 0.18f, 0.2f, 0.25f, 0.3f, 0.31f, 0.35f, 0.45f, 0.55f, 0.65f, 0.75f, 0.85f)) {
-                var prev: Int? = null
-                var prevTilt = 0f
-                var tilt = 0f
-                while (tilt <= 0.0201f) {
-                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
-                    val radius = curlRadius(shape)
-                    val mesh = buildCurlMesh(shape, radius)
-                    val edges = mesh.pageEdges() ?: break
-                    val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
-                    val flatTurn = PI.toFloat() * radius
-                    val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
-                    val width = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
-                    val last = edges[0].size - 1
-                    // 只量「两条页边在纸角上相交」的帧：那是扇形在场、也是翻边最刺眼的形状。
-                    val corner = taperFrom != null && (edges[0][last] - edges[1][last]).getDistance() < 0.5f
-                    if (corner && width >= 6f) {
-                        val n0 = outwardNormals(mesh, shape, radius, 0, edges[0], taperFrom)
-                        val n1 = outwardNormals(mesh, shape, radius, 1, edges[1], taperFrom)
-                        if (n0 != null && n1 != null) {
-                            // 扇形两条边的叉积符号 = 铺向折角外的那一楔在纸边的哪一侧。
-                            val cross = n0[last].x * n1[last].y - n0[last].y * n1[last].x
-                            val side = if (cross >= 0f) 1 else -1
-                            if (prev != null) {
-                                assertTrue(
-                                    "dir=$dir p=$p tilt=$prevTilt→$tilt 影带翻到了页边另一侧" +
-                                        "（影宽 ${width.toInt()}px）：读者看到的就是「阴影带左右来回切换」",
-                                    side == prev,
-                                )
-                            }
-                            prev = side
-                            prevTilt = tilt
-                            total++
+        for (p in listOf(0.15f, 0.18f, 0.2f, 0.25f, 0.3f, 0.31f, 0.35f, 0.45f, 0.55f, 0.65f, 0.75f, 0.85f)) {
+            var prev: Int? = null
+            var prevTilt = 0f
+            var tilt = 0f
+            while (tilt <= 0.0201f) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt = tilt)
+                val radius = curlRadius(shape)
+                val mesh = buildCurlMesh(shape, radius)
+                val edges = mesh.pageEdges() ?: break
+                val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
+                val flatTurn = PI.toFloat() * radius
+                val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
+                val width = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
+                val last = edges[0].size - 1
+                // 只量「两条页边在纸角上相交」的帧：那是扇形在场、也是翻边最刺眼的形状。
+                val corner = taperFrom != null && (edges[0][last] - edges[1][last]).getDistance() < 0.5f
+                if (corner && width >= 6f) {
+                    val n0 = outwardNormals(mesh, shape, radius, 0, edges[0], taperFrom)
+                    val n1 = outwardNormals(mesh, shape, radius, 1, edges[1], taperFrom)
+                    if (n0 != null && n1 != null) {
+                        // 扇形两条边的叉积符号 = 铺向折角外的那一楔在纸边的哪一侧。
+                        val cross = n0[last].x * n1[last].y - n0[last].y * n1[last].x
+                        val side = if (cross >= 0f) 1 else -1
+                        if (prev != null) {
+                            assertTrue(
+                                "p=$p tilt=$prevTilt→$tilt 影带翻到了页边另一侧" +
+                                    "（影宽 ${width.toInt()}px）：读者看到的就是「阴影带左右来回切换」",
+                                side == prev,
+                            )
                         }
+                        prev = side
+                        prevTilt = tilt
+                        total++
                     }
-                    tilt += 0.0005f
                 }
+                tilt += 0.0005f
             }
         }
         assertTrue("一帧都没量到，测试没测到东西", total > 100)
@@ -1605,75 +1555,73 @@ class Curl3DRenderTest {
     fun nearVerticalFoldTurnsTheShadowWidthGradually() {
         val w = 400
         val h = 600
-        for (dir in listOf(1, -1)) {
-            for (p in listOf(0.3f, 0.45f)) {
-                // 两条影带的「屏幕最上/最下那一点」的宽度：一条满宽在上、一条满宽在下。
-                val prevTop = floatArrayOf(Float.NaN, Float.NaN)
-                val prevBottom = floatArrayOf(Float.NaN, Float.NaN)
-                var minWidth = Float.MAX_VALUE
-                var maxWidthSeen = 0f
-                var checked = 0
-                var tilt = -0.07f
-                while (tilt <= 0.0701f) {
-                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt = tilt)
-                    val radius = curlRadius(shape)
-                    val mesh = buildCurlMesh(shape, radius)
-                    val edges = mesh.pageEdges()
-                    val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
-                    val flatTurn = PI.toFloat() * radius
-                    val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
-                    val fullWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
-                    if (edges != null && taperFrom != null && fullWidth >= 6f) {
-                        val bias = shadowTaperBias(shape.lean, shape.shadowFade)
-                        // 每条影带都在屏幕最上、最下那一点量宽度（影宽 = 满宽 × 斜坡）。
-                        for (k in 0..1) {
-                            val edge = edges[k]
-                            val n = edge.size - taperFrom
-                            if (n < 2) continue
-                            val tAt = FloatArray(n)
-                            var cum = 0f
-                            for (i in 1 until n) {
-                                cum += (edge[taperFrom + i] - edge[taperFrom + i - 1]).getDistance()
-                                tAt[i] = cum
-                            }
-                            if (cum < 1f) continue
-                            for (i in 0 until n) tAt[i] /= cum
-                            var topI = 0
-                            var botI = 0
-                            for (i in 0 until n) {
-                                if (edge[taperFrom + i].y < edge[taperFrom + topI].y) topI = i
-                                if (edge[taperFrom + i].y > edge[taperFrom + botI].y) botI = i
-                            }
-                            val top = fullWidth * shadowWidthProfile(tAt[topI], bias)
-                            val bottom = fullWidth * shadowWidthProfile(tAt[botI], bias)
-                            if (!prevTop[k].isNaN()) {
-                                assertTrue(
-                                    "dir=$dir p=$p tilt=${(tilt * 1000).toInt()} 边$k 屏幕上端的影宽从 " +
-                                        "${prevTop[k]} 跳到 $top —— 读者看到的就是「两头的宽度突然切换」",
-                                    abs(top - prevTop[k]) <= 6f,
-                                )
-                                assertTrue(
-                                    "dir=$dir p=$p tilt=${(tilt * 1000).toInt()} 边$k 屏幕下端的影宽从 " +
-                                        "${prevBottom[k]} 跳到 $bottom —— 读者看到的就是「两头的宽度突然切换」",
-                                    abs(bottom - prevBottom[k]) <= 6f,
-                                )
-                            }
-                            prevTop[k] = top
-                            prevBottom[k] = bottom
-                            minWidth = minOf(minWidth, minOf(top, bottom))
-                            maxWidthSeen = maxOf(maxWidthSeen, maxOf(top, bottom))
-                            checked++
+        for (p in listOf(0.3f, 0.45f)) {
+            // 两条影带的「屏幕最上/最下那一点」的宽度：一条满宽在上、一条满宽在下。
+            val prevTop = floatArrayOf(Float.NaN, Float.NaN)
+            val prevBottom = floatArrayOf(Float.NaN, Float.NaN)
+            var minWidth = Float.MAX_VALUE
+            var maxWidthSeen = 0f
+            var checked = 0
+            var tilt = -0.07f
+            while (tilt <= 0.0701f) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt = tilt)
+                val radius = curlRadius(shape)
+                val mesh = buildCurlMesh(shape, radius)
+                val edges = mesh.pageEdges()
+                val taperFrom = mesh.firstRowAtArc(PI.toFloat() * radius * 0.5f)
+                val flatTurn = PI.toFloat() * radius
+                val ramp = ((mesh.maxArc() - flatTurn * 0.5f) / flatTurn).coerceIn(0f, 1f)
+                val fullWidth = radius * CURL3D_BACK_SHADOW_WIDTH * ramp
+                if (edges != null && taperFrom != null && fullWidth >= 6f) {
+                    val bias = shadowTaperBias(shape.lean, shape.shadowFade)
+                    // 每条影带都在屏幕最上、最下那一点量宽度（影宽 = 满宽 × 斜坡）。
+                    for (k in 0..1) {
+                        val edge = edges[k]
+                        val n = edge.size - taperFrom
+                        if (n < 2) continue
+                        val tAt = FloatArray(n)
+                        var cum = 0f
+                        for (i in 1 until n) {
+                            cum += (edge[taperFrom + i] - edge[taperFrom + i - 1]).getDistance()
+                            tAt[i] = cum
                         }
+                        if (cum < 1f) continue
+                        for (i in 0 until n) tAt[i] /= cum
+                        var topI = 0
+                        var botI = 0
+                        for (i in 0 until n) {
+                            if (edge[taperFrom + i].y < edge[taperFrom + topI].y) topI = i
+                            if (edge[taperFrom + i].y > edge[taperFrom + botI].y) botI = i
+                        }
+                        val top = fullWidth * shadowWidthProfile(tAt[topI], bias)
+                        val bottom = fullWidth * shadowWidthProfile(tAt[botI], bias)
+                        if (!prevTop[k].isNaN()) {
+                            assertTrue(
+                                "p=$p tilt=${(tilt * 1000).toInt()} 边$k 屏幕上端的影宽从 " +
+                                    "${prevTop[k]} 跳到 $top —— 读者看到的就是「两头的宽度突然切换」",
+                                abs(top - prevTop[k]) <= 6f,
+                            )
+                            assertTrue(
+                                "p=$p tilt=${(tilt * 1000).toInt()} 边$k 屏幕下端的影宽从 " +
+                                    "${prevBottom[k]} 跳到 $bottom —— 读者看到的就是「两头的宽度突然切换」",
+                                abs(bottom - prevBottom[k]) <= 6f,
+                            )
+                        }
+                        prevTop[k] = top
+                        prevBottom[k] = bottom
+                        minWidth = minOf(minWidth, minOf(top, bottom))
+                        maxWidthSeen = maxOf(maxWidthSeen, maxOf(top, bottom))
+                        checked++
                     }
-                    tilt += 0.001f
                 }
-                assertTrue("dir=$dir p=$p 一帧都没量到，测试没测到东西", checked > 20)
-                // 真的从「两端一样宽」转到了「一头满宽、一头为 0」，不是整段都没动。
-                assertTrue(
-                    "dir=$dir p=$p 影宽整段没有随倾斜变化（$minWidth..$maxWidthSeen），测了个寂寞",
-                    maxWidthSeen > 6f && minWidth < maxWidthSeen * 0.25f,
-                )
+                tilt += 0.001f
             }
+            assertTrue("p=$p 一帧都没量到，测试没测到东西", checked > 20)
+            // 真的从「两端一样宽」转到了「一头满宽、一头为 0」，不是整段都没动。
+            assertTrue(
+                "p=$p 影宽整段没有随倾斜变化（$minWidth..$maxWidthSeen），测了个寂寞",
+                maxWidthSeen > 6f && minWidth < maxWidthSeen * 0.25f,
+            )
         }
     }
 
@@ -1697,45 +1645,43 @@ class Curl3DRenderTest {
         // 露出页整页纸色：新页栅格没就绪的那一帧（以及折痕压在页边距上的那几行）就是这样。
         val paperPage = solid(w, h, paper)
         for (p in listOf(0.10f, 0.25f, 0.40f)) {
-            for (dir in listOf(1, -1)) {
-                for (tilt in listOf(0.25f, -0.25f)) {
-                    val shape = curlShape(w.toFloat(), h.toFloat(), p, dir, tilt)
-                    val pm = render(shape, cover, paperPage).toPixelMap()
-                    // 沿折痕法向取剖面、按行平均：逐行的内容噪声被抹平，只剩「折痕那一列」的线。
-                    val slope = (shape.bottomX - shape.topX) / h
-                    val norm = sqrt(1f + slope * slope)
-                    val sums = DoubleArray(FOLD_PROFILE_PX)
-                    val counts = IntArray(FOLD_PROFILE_PX)
-                    for (y in 260 until h - 260) {
-                        val x0 = shape.topX + slope * y
-                        for (off in -FOLD_PROFILE_HALF..FOLD_PROFILE_HALF) {
-                            val xx = (x0 + off / norm).roundToInt()
-                            val yy = (y - off * slope / norm).roundToInt()
-                            if (xx in 0 until w && yy in 0 until h) {
-                                sums[off + FOLD_PROFILE_HALF] += luma(pm[xx, yy])
-                                counts[off + FOLD_PROFILE_HALF]++
-                            }
+            for (tilt in listOf(0.25f, -0.25f)) {
+                val shape = curlShape(w.toFloat(), h.toFloat(), p, tilt)
+                val pm = render(shape, cover, paperPage).toPixelMap()
+                // 沿折痕法向取剖面、按行平均：逐行的内容噪声被抹平，只剩「折痕那一列」的线。
+                val slope = (shape.bottomX - shape.topX) / h
+                val norm = sqrt(1f + slope * slope)
+                val sums = DoubleArray(FOLD_PROFILE_PX)
+                val counts = IntArray(FOLD_PROFILE_PX)
+                for (y in 260 until h - 260) {
+                    val x0 = shape.topX + slope * y
+                    for (off in -FOLD_PROFILE_HALF..FOLD_PROFILE_HALF) {
+                        val xx = (x0 + off / norm).roundToInt()
+                        val yy = (y - off * slope / norm).roundToInt()
+                        if (xx in 0 until w && yy in 0 until h) {
+                            sums[off + FOLD_PROFILE_HALF] += luma(pm[xx, yy])
+                            counts[off + FOLD_PROFILE_HALF]++
                         }
                     }
-                    val v = DoubleArray(FOLD_PROFILE_PX) {
-                        if (counts[it] == 0) 0.0 else sums[it] / counts[it]
-                    }
-                    var worst = 0.0
-                    var where = ""
-                    for (off in -1..1) {
-                        val i = off + FOLD_PROFILE_HALF
-                        val d = abs(v[i] - (v[i - 1] + v[i + 1]) / 2.0)
-                        if (d > worst) {
-                            worst = d
-                            where = "偏移 $off（0 = 折痕列）剖面 " +
-                                v.joinToString(" ") { "%.3f".format(it) }
-                        }
-                    }
-                    assertTrue(
-                        "p=$p dir=$dir tilt=$tilt 折痕上有一条接缝线：偏离 ${"%.3f".format(worst)} $where",
-                        worst <= 0.03,
-                    )
                 }
+                val v = DoubleArray(FOLD_PROFILE_PX) {
+                    if (counts[it] == 0) 0.0 else sums[it] / counts[it]
+                }
+                var worst = 0.0
+                var where = ""
+                for (off in -1..1) {
+                    val i = off + FOLD_PROFILE_HALF
+                    val d = abs(v[i] - (v[i - 1] + v[i + 1]) / 2.0)
+                    if (d > worst) {
+                        worst = d
+                        where = "偏移 $off（0 = 折痕列）剖面 " +
+                            v.joinToString(" ") { "%.3f".format(it) }
+                    }
+                }
+                assertTrue(
+                    "p=$p tilt=$tilt 折痕上有一条接缝线：偏离 ${"%.3f".format(worst)} $where",
+                    worst <= 0.03,
+                )
             }
         }
     }

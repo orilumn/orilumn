@@ -50,7 +50,7 @@ class Curl3DOverlayTest {
     }
 
     private fun render(front: CurlPageImages, back: CurlPageImages): ImageBitmap {
-        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress = 0.5f, direction = 1)
+        val shape = curlShape(pageW.toFloat(), pageH.toFloat(), progress = 0.5f)
         val img = ImageBitmap(pageW, pageH, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(
             density = Density(1f),

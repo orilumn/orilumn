@@ -84,7 +84,7 @@ class CurlRenderTest {
     fun nextPageKeepsFrontLeftBackMiddleAndRevealRight() {
         val w = 400
         val h = 600
-        val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f, direction = 1)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f)
         val px = render(shape, images(solid(w, h, red)), images(solid(w, h, blue))).toPixelMap()
 
         val left = px[4, h / 2].toArgb()
@@ -108,7 +108,7 @@ class CurlRenderTest {
     fun backStripKeepsMaterialScale() {
         val w = 400
         val h = 600
-        val shape = curlShape(w.toFloat(), h.toFloat(), 0.5f, direction = 1)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.5f)
         val px = render(shape, images(striped(w, h, stripeX = 348, stripeW = 4)), images(solid(w, h, blue))).toPixelMap()
 
         var darkestX = -1
@@ -133,22 +133,20 @@ class CurlRenderTest {
     fun settleEndFramesEqualThePageTheyLandOn() {
         val w = 400
         val h = 600
-        for (dir in listOf(1, -1)) {
-            val start = render(
-                curlShape(w.toFloat(), h.toFloat(), 0f, dir, tilt = 0.55f),
-                images(solid(w, h, red)),
-                images(solid(w, h, blue)),
-            ).toPixelMap()
-            val end = render(
-                curlShape(w.toFloat(), h.toFloat(), 1f, dir, tilt = 0.55f),
-                images(solid(w, h, red)),
-                images(solid(w, h, blue)),
-            ).toPixelMap()
-            for (x in 0 until w step 7) {
-                for (y in 0 until h step 13) {
-                    assertEquals("dir=$dir 起手那一帧应当只剩当前页（front）", red, start[x, y].toArgb())
-                    assertEquals("dir=$dir 收尾那一帧应当只剩目标页（back）", blue, end[x, y].toArgb())
-                }
+        val start = render(
+            curlShape(w.toFloat(), h.toFloat(), 0f, tilt = 0.55f),
+            images(solid(w, h, red)),
+            images(solid(w, h, blue)),
+        ).toPixelMap()
+        val end = render(
+            curlShape(w.toFloat(), h.toFloat(), 1f, tilt = 0.55f),
+            images(solid(w, h, red)),
+            images(solid(w, h, blue)),
+        ).toPixelMap()
+        for (x in 0 until w step 7) {
+            for (y in 0 until h step 13) {
+                assertEquals("起手那一帧应当只剩当前页（front）", red, start[x, y].toArgb())
+                assertEquals("收尾那一帧应当只剩目标页（back）", blue, end[x, y].toArgb())
             }
         }
     }
@@ -180,15 +178,13 @@ class CurlRenderTest {
     fun untouchedFrameIsThePageBeingRead() {
         val w = 400
         val h = 600
-        // 两个方向都是「front = 正在看的那一页」：翻页层不再按方向换位，图像不换位。
-        for (dir in listOf(1, -1)) {
-            val px = render(
-                curlShape(w.toFloat(), h.toFloat(), 0f, dir),
-                images(solid(w, h, red)),
-                images(solid(w, h, blue)),
-            ).toPixelMap()
-            assertEquals("dir=$dir 起手时画面上是当前页，不是目标页", red, px[200, 300].toArgb())
-        }
+        // front = 正在看的那一页：翻页层不按方向换位，图像不换位。
+        val px = render(
+            curlShape(w.toFloat(), h.toFloat(), 0f),
+            images(solid(w, h, red)),
+            images(solid(w, h, blue)),
+        ).toPixelMap()
+        assertEquals("起手时画面上是当前页，不是目标页", red, px[200, 300].toArgb())
     }
 
     /**
@@ -199,7 +195,7 @@ class CurlRenderTest {
     fun overlayRidesTheWholeSheet() {
         val w = 400
         val h = 600
-        val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f, direction = 1)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f)
         // 覆盖层：整页大小的一块绿（模拟旁注框）
         val overlay = ImageBitmap(w, h, ImageBitmapConfig.Argb8888, hasAlpha = true)
         CanvasDrawScope().draw(Density(1f), LayoutDirection.Ltr, Canvas(overlay), Size(w.toFloat(), h.toFloat())) {
@@ -227,7 +223,7 @@ class CurlRenderTest {
     fun frameHasNoTransparentPixels() {
         val w = 400
         val h = 600
-        val shape = curlShape(w.toFloat(), h.toFloat(), 0.35f, direction = 1, tilt = 0.36f)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.35f, tilt = 0.36f)
         val px = render(shape, images(solid(w, h, red)), images(solid(w, h, blue))).toPixelMap()
         var transparent = 0
         for (y in 0 until h step 11) {
@@ -245,7 +241,7 @@ class CurlRenderTest {
         val h = 600
         val texLeft = 30
         val texTop = 20
-        val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f, direction = 1)
+        val shape = curlShape(w.toFloat(), h.toFloat(), 0.25f)
         val px = render(
             shape,
             images(solid(340, 560, red)),

@@ -1,11 +1,24 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.gradle.api.tasks.testing.Test
+import java.io.File
+import java.util.Properties
 
 /**
  * 版本号唯一来源：`gradle.properties` 的 `orilumn.versionName`（app 与 desktopApp 共读）。
  * 见该文件里的说明 —— 三个消费者曾各写一遍字面量，升版漏一处就出半吊子状态。
  */
 val appVersionName: String = providers.gradleProperty("orilumn.versionName").get()
+
+/**
+ * Release 签名材料按优先级取两处：
+ * 1. 环境变量（CI 从 Secrets 注入，见 `.github/workflows/build-release.yml`）；
+ * 2. 仓库根 `keystore/`（已被 `.gitignore` 排除、随项目目录同步到其他开发机）。
+ * 两处都没有时 release 回退 debug 签名 —— 只能本机安装调试，换机器会因签名不符无法覆盖安装。
+ */
+val localKeystoreFile: File? = rootProject.file("keystore/orilum-release.jks").takeIf { it.isFile }
+val localKeystoreCred: File? = rootProject.file("keystore/orilum-release.cred.txt").takeIf { it.isFile }
+val hasReleaseSigning: Boolean =
+    System.getenv("KEYSTORE_FILE") != null || (localKeystoreFile != null && localKeystoreCred != null)
 
 plugins {
     alias(libs.plugins.android.application)
@@ -42,17 +55,24 @@ android {
         }
     }
 
-    // Release 签名材料由 GitHub Actions 在运行时从 Secrets 解码注入（不入库）。
+    // Release 签名材料由 GitHub Actions 在运行时从 Secrets 解码注入（不入库）；
+    // 本地则读仓库根 `keystore/`（不入库、随项目目录同步），两边用同一把钥匙。
     // 读取环境变量：KEYSTORE_FILE / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD。
-    // 本地未注入这些变量时，signingConfig 保持为空，release 回退用 debug 签名以便安装调试。
+    // 两处都没有时 signingConfig 保持为空，release 回退用 debug 签名以便安装调试。
     signingConfigs {
         create("release") {
-            val keystoreFile = System.getenv("KEYSTORE_FILE")
-            if (keystoreFile != null) {
-                storeFile = file(keystoreFile)
+            val envKeystoreFile = System.getenv("KEYSTORE_FILE")
+            if (envKeystoreFile != null) {
+                storeFile = file(envKeystoreFile)
                 storePassword = System.getenv("KEYSTORE_PASSWORD")
                 keyAlias = System.getenv("KEY_ALIAS")
                 keyPassword = System.getenv("KEY_PASSWORD")
+            } else if (localKeystoreFile != null && localKeystoreCred != null) {
+                val cred = Properties().apply { localKeystoreCred.inputStream().use { load(it) } }
+                storeFile = localKeystoreFile
+                storePassword = cred.getProperty("KEYSTORE_PASSWORD")
+                keyAlias = cred.getProperty("KEY_ALIAS")
+                keyPassword = cred.getProperty("KEY_PASSWORD")
             }
         }
     }
@@ -60,13 +80,12 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
-            isDebuggable = true // TEMP-LOCAL, DO NOT COMMIT
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",
             )
-            // CI 注入密钥时用真实 release 签名；本地无密钥时回退 debug 签名，避免构建失败。
-            signingConfig = if (System.getenv("KEYSTORE_FILE") != null) {
+            // CI 注入密钥或本地 keystore/ 就绪时用真实 release 签名；否则回退 debug 签名，避免构建失败。
+            signingConfig = if (hasReleaseSigning) {
                 signingConfigs.getByName("release")
             } else {
                 signingConfigs.getByName("debug")
